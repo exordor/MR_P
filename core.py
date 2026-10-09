@@ -27,6 +27,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 VERSION = "0.1.0-prototype"
+DISPLAY_LIMIT = 30_000
 HEADERS = ["object ID", "x", "y", "z", "Nr_of_points", "Intensity", "Area", "confidence"]
 FEATURES = ["local_height", "roughness", "linearity", "planarity", "sphericity",
             "radius", "relative_intensity", "raw_intensity_scaled", "return_position",
@@ -384,6 +385,23 @@ def projected_area(xyz, method):
         return None
 
 
+def display_indices(instance, limit=DISPLAY_LIMIT):
+    """Bound display size, retaining a representative of each instance if possible."""
+    if not 1 <= limit <= DISPLAY_LIMIT:
+        raise ValueError(f"Display limit must be 1..{DISPLAY_LIMIT}")
+    if len(instance) <= limit:
+        return np.arange(len(instance))
+    labels, first = np.unique(instance, return_index=True)
+    representatives = first[labels > 0]
+    rng = np.random.default_rng(42)
+    if len(representatives) > limit:
+        return np.sort(rng.choice(representatives, limit, replace=False))
+    available = np.ones(len(instance), dtype=bool)
+    available[representatives] = False
+    extra = rng.choice(np.flatnonzero(available), limit - len(representatives), replace=False)
+    return np.sort(np.concatenate((representatives, extra)))
+
+
 def process_batch(paths, model_path, output_root, cfg, log=print):
     validate_settings(cfg)
     if not paths:
@@ -448,9 +466,13 @@ def process_batch(paths, model_path, output_root, cfg, log=print):
                 writer = csv.writer(stream)
                 writer.writerow(HEADERS)
                 writer.writerows(rows)
-            np.savez_compressed(folder / "view.npz", xyz=cloud["xyz"],
-                                point_index=np.arange(len(features)), instance=point_instance,
-                                predicted_class=classes, confidence=confidence)
+            selected_view = display_indices(point_instance)
+            np.savez_compressed(folder / "view.npz", xyz=cloud["xyz"][selected_view],
+                                point_index=selected_view, instance=point_instance[selected_view],
+                                predicted_class=classes[selected_view], confidence=confidence[selected_view],
+                                origin=cloud["xyz"].mean(axis=0), total_points=len(features))
+            entry["display"] = {"source_points": len(features), "cached_points": len(selected_view),
+                                "limit": DISPLAY_LIMIT, "method": "deterministic representative sampling"}
             write_json(folder / "objects.json", objects)
             entry.update(status="success" if objects else "success_no_objects", object_count=len(objects))
             log(f"{dataset_id}: {len(objects)} objects")

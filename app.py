@@ -5,6 +5,7 @@ import json
 import queue
 import threading
 import tkinter as tk
+import zipfile
 from dataclasses import asdict
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -13,14 +14,14 @@ import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from core import (VERSION, Settings, evaluate_model, label_template, process_batch,
+from core import (DISPLAY_LIMIT, Settings, display_indices, evaluate_model, label_template, process_batch,
                   read_cloud, train_model)
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f"MOST Robotics | YellowScan Object Detection | {VERSION}")
+        self.title("Object Detection")
         self.geometry("1320x900")
         self.minsize(1200, 750)
         self.events = queue.Queue()
@@ -43,6 +44,7 @@ class App(tk.Tk):
         self.limit = tk.StringVar(value="500000")
         self.backend = tk.StringVar(value="random_forest")
         self.iterations = tk.StringVar(value="100")
+        self.display_limit = tk.StringVar(value=str(DISPLAY_LIMIT))
         self.area = tk.StringVar(value="unresolved")
         self.build_ui()
         self.after(100, self.poll)
@@ -51,14 +53,14 @@ class App(tk.Tk):
     def build_ui(self):
         top = ttk.Frame(self, padding=12)
         top.pack(fill="x")
-        ttk.Label(top, text="YellowScan Underwater Object Detection", font=("Arial", 17, "bold")).pack(anchor="w")
-        ttk.Label(top, text="Research prototype | No pretrained underwater model | Full waveform not integrated").pack(anchor="w", pady=(2, 9))
+        ttk.Label(top, text="Object Detection", font=("Arial", 17, "bold")).pack(anchor="w")
+        ttk.Label(top, text="Train a model, detect objects, and view point clouds.").pack(anchor="w", pady=(2, 9))
         notebooks = ttk.Notebook(self)
         notebooks.pack(fill="both", expand=True, padx=12)
         processing, training = ttk.Frame(notebooks, padding=10), ttk.Frame(notebooks, padding=10)
         notebooks.add(processing, text="Process and View")
         notebooks.add(training, text="Train and Evaluate")
-        self.path_row(processing, "Trusted MOST model", self.model_path, self.pick_model, 0)
+        self.path_row(processing, "Trained model (trusted file)", self.model_path, self.pick_model, 0)
         self.path_row(processing, "Results directory", self.output_path, self.pick_output, 1)
         controls = ttk.Frame(processing)
         controls.grid(row=2, column=0, columnspan=3, sticky="ew", pady=6)
@@ -77,6 +79,10 @@ class App(tk.Tk):
         ttk.Button(viewer_controls, text="View", command=self.view).pack(side="left", padx=8)
         ttk.Checkbutton(viewer_controls, text="Show objects", variable=self.show_objects,
                         command=self.redraw).pack(side="left")
+        ttk.Label(viewer_controls, text="Display points").pack(side="left", padx=(12, 4))
+        ttk.Combobox(viewer_controls, textvariable=self.display_limit,
+                     values=["1000", "5000", "10000", "30000"], state="readonly", width=8).pack(side="left")
+        ttk.Button(viewer_controls, text="Apply", command=self.view).pack(side="left", padx=4)
         self.view_note = ttk.Label(processing, text="Click View after processing. Display: up to 30,000 points; exports retain all points.")
         self.view_note.grid(row=5, column=0, columnspan=3, sticky="w")
         body = ttk.Frame(processing)
@@ -192,7 +198,7 @@ class App(tk.Tk):
         self.after(100, self.poll)
 
     def pick_model(self):
-        path = filedialog.askopenfilename(filetypes=[("MOST model (trusted only)", "*.joblib")])
+        path = filedialog.askopenfilename(filetypes=[("Trained model (trusted only)", "*.joblib")])
         if path:
             self.model_path.set(path)
 
@@ -244,7 +250,7 @@ class App(tk.Tk):
             backend, iterations = self.backend.get(), int(self.iterations.get())
             if not manifest:
                 raise ValueError("Select a dataset manifest JSON")
-            dest = filedialog.asksaveasfilename(defaultextension=".joblib", filetypes=[("MOST model", "*.joblib")])
+            dest = filedialog.asksaveasfilename(defaultextension=".joblib", filetypes=[("Trained model", "*.joblib")])
             if dest:
                 self.job(lambda: train_model(manifest, dest, cfg, backend, iterations, self.log), self.model_path.set)
         self.safe_action(action)
@@ -291,7 +297,7 @@ class App(tk.Tk):
             self.load_run(candidates[-1].parent)
             self.show_objects.set(True)
             self.view()
-            self.log("Synthetic demonstration only; this model has not been validated on real YellowScan data.")
+            self.log("Synthetic demonstration only; this model has not been validated on real survey data.")
         self.safe_action(action)
 
     def load_run(self, path):
@@ -318,17 +324,23 @@ class App(tk.Tk):
             key = self.dataset.get().split(" | ", 1)[0]
             folder = self.run_path / self.datasets[key]["result_path"]
             self.current_objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
-            with np.load(folder / "view.npz", allow_pickle=False) as data:
+            cache = folder / "view.npz"
+            # Reject oversized legacy caches before decompressing full arrays.
+            with zipfile.ZipFile(cache) as archive:
+                if sum(item.file_size for item in archive.infolist()) > 32 * 1024 * 1024:
+                    raise ValueError("Saved display cache is too large. Reprocess with this version to create a downsampled cache.")
+            with np.load(cache, allow_pickle=False) as data:
                 xyz, instance = data["xyz"], data["instance"]
-                # Deterministic display subset; exports/metrics retain original points.
-                indices = np.linspace(0, len(xyz) - 1, min(30000, len(xyz)), dtype=int)
-                self.current_data = (xyz[indices], instance[indices], xyz.mean(axis=0))
+                indices = display_indices(instance, int(self.display_limit.get()))
+                origin = data["origin"] if "origin" in data else xyz.mean(axis=0)
+                total = int(data["total_points"]) if "total_points" in data else len(xyz)
+                self.current_data = (xyz[indices], instance[indices], origin)
             self.selected_object = None
             self.object_list.delete(0, "end")
             for obj in self.current_objects:
                 self.object_list.insert("end", f"{obj['object_id']} ({obj['class_name']})")
-            self.view_note.configure(text=f"{len(self.current_objects)} objects; scene-centred display. Left: rotate; middle: pan; right: zoom."
-                                     if self.current_objects else "Processing succeeded; no objects detected.")
+            self.view_note.configure(text=f"Displaying {len(indices):,} / {total:,} points (display only); "
+                                     f"{len(self.current_objects)} objects. Left: rotate; middle: pan; right: zoom.")
             self.redraw()
         self.safe_action(action)
 

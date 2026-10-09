@@ -8,13 +8,27 @@ from pathlib import Path
 
 import numpy as np
 
-from core import (HEADERS, Settings, evaluate_model, extract_features, instance_groups,
+from core import (HEADERS, Settings, display_indices, evaluate_model, extract_features, instance_groups,
                   load_manifest, load_model, make_run_directory, process_batch,
                   projected_area, read_cloud, train_model)
 from create_demo import create_demo
 
 
 class WorkflowTest(unittest.TestCase):
+    def test_display_sampling_bounds_and_preserves_small_objects(self):
+        instance = np.zeros(100_000, dtype=np.int32)
+        instance[123] = 1
+        instance[-7:] = 2
+        for budget in (1000, 5000, 30000):
+            selected = display_indices(instance, budget)
+            self.assertEqual(len(selected), budget)
+            self.assertEqual(len(np.unique(selected)), budget)
+            self.assertEqual(set(instance[selected]), {0, 1, 2})
+            np.testing.assert_array_equal(selected, display_indices(instance, budget))
+        np.testing.assert_array_equal(display_indices(instance[:10]), np.arange(10))
+        with self.assertRaises(ValueError):
+            display_indices(instance, 30001)
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
@@ -46,6 +60,8 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
             with np.load(folder / "view.npz", allow_pickle=False) as cached:
+                self.assertEqual(int(cached["total_points"]), len(original))
+                np.testing.assert_allclose(cached["origin"], original.mean(axis=0))
                 self.assertTrue(np.array_equal(cached["xyz"], original))
                 self.assertTrue(np.array_equal(cached["point_index"], np.arange(len(original))))
                 for row, obj in zip(rows, objects):

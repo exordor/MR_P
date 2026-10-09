@@ -1,4 +1,4 @@
-# MOST Robotics underwater object detection
+# Object Detection
 
 A small offline desktop prototype for detecting and separating underwater objects in georeferenced YellowScan LAS/LAZ point clouds. The current implementation uses a Random Forest baseline, an optional MLP feature network, and per-class DBSCAN instance grouping.
 
@@ -44,7 +44,7 @@ The demonstration contains no real YellowScan measurements. Its trained model an
 3. Prepare labels in `point_index,class_id` CSV files. Indices refer to the original zero-based point-record order. Class 0 is background, positive integers are target classes, and blank or -1 means unlabelled. External annotation tools must preserve or recover this mapping.
 4. Create a dataset manifest using `manifest_example.json`. Separate independent scenes or non-overlapping regions into train, validation and test sets. Use the same `scene_id` for overlapping data; the software checks duplicate paths, identical file content and cross-split scene IDs, but cannot prove that different files do not overlap spatially.
 5. Select the manifest in **Train and Evaluate**, choose a backend and training iterations, and save a new model. Every declared class must appear in the training labels. Validation metrics and model settings are saved alongside the model. Test labels are used only when **Evaluate held-out test set** is clicked.
-6. In **Process and View**, select a trusted MOST model, one or more input files, and a results directory. Files run sequentially; a failed file does not stop the remaining batch.
+6. In **Process and View**, select a trusted trained model, one or more input files, and a results directory. Files run sequentially; a failed file does not stop the remaining batch.
 7. Click **View**, toggle **Show objects**, and select an object ID in the list. Left drag rotates, middle drag pans, and right drag zooms. Saved results can be reopened without rerunning inference or reading the original input file.
 
 ## Outputs and definitions
@@ -76,7 +76,7 @@ object ID,x,y,z,Nr_of_points,Intensity,Area,confidence
 - **Area** is blank by default (`unresolved`). An explicitly selected `convex_hull_xy` computes the horizontal convex-hull footprint in square metres. It fills concavities and holes and is not 3D surface area. The method needs project approval before acceptance.
 - **Confidence** is the mean winning-class probability of the points assigned to the final instance. It is uncalibrated and is not measured detection accuracy.
 
-Processing and CSV export use original points without downsampling. The viewer displays a deterministic subset of up to 30,000 points. Object IDs match across the report, object files and viewer cache. Source mapping is retained through per-dataset reports and metadata. CSV is UTF-8 with a BOM; missing values use blank cells and JSON nulls.
+Processing and CSV export use original points without downsampling. New display caches contain at most 30,000 deterministically sampled original points, preserving an example of each detected instance where the budget permits. The viewer offers 1,000, 5,000, 10,000 or 30,000 display points; click Apply after choosing. Display sampling does not change inference, object coordinates, reports or CSV exports. Oversized legacy caches are rejected before decompression and must be regenerated. Object IDs match across the report, object files and viewer cache. Source mapping is retained through per-dataset reports and metadata. CSV is UTF-8 with a BOM; missing values use blank cells and JSON nulls.
 
 ## Scope and limits
 
@@ -101,4 +101,6 @@ All four supplied `preparation` files are preserved unchanged in `preparation/`.
 .venv\Scripts\python.exe -m unittest -v
 ```
 
-Nine workflow tests cover LAZ reading, training and model reload, relocated model/data references, MLP availability, batch failure isolation, no-object results, IDs and exported original points, point counts, centroids, known-area geometry, split leakage checks and coordinate translation invariance. These are functional checks, not a real-world detection benchmark.
+Ten workflow tests cover LAZ reading, training and model reload, relocated model/data references, MLP availability, batch failure isolation, no-object results, IDs and exported original points, point counts, centroids, known-area geometry, split leakage checks and coordinate translation invariance. These are functional checks, not a real-world detection benchmark.
+
+The application window and heading are named **Object Detection**. Its short introduction describes the workflow; model limitations remain documented here. The model uses scikit-learn RandomForestClassifier by default, or StandardScaler plus MLPClassifier (64/64/32), followed by per-class DBSCAN grouping. There is no pretrained real-survey model bundled.
