@@ -32,3 +32,7 @@ Voxelisation must retain an explicit mapping back to original points. Tiled proc
 Target classes, annotation effort, final train/validation/test scenes, area definition, intensity and confidence treatment, output precision, supported platform versions, hardware, object-level quality metrics and acceptance thresholds remain project decisions. See the original v0.2 requirements.
 
 The current processing strategy is full-file CPU execution, with explicit size limits. It does not provide learning-based instance separation, full-waveform integration, large-cloud tiling or cross-file duplicate merging.
+
+## Display memory update
+
+The application is titled Object Detection. Processing creates a separate display cache with at most 30,000 original points, deterministic instance representatives and original point indices. The UI can reduce this to 1,000, 5,000 or 10,000 points. Reports and exports retain full-resolution detected points. Legacy NPZ caches above 32 MiB uncompressed are rejected before decompression. The default 500,000-point processing limit remains; this update does not implement large-cloud tiled inference.

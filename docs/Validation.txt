@@ -5,7 +5,8 @@ Environment: Windows build 26100, Python 3.11.9, Tk 8.6.12.
 Pinned dependency versions are listed in requirements.txt.
 Linux installation and real YellowScan recognition have not been validated.
 
-Nine synthetic LAZ workflow tests passed:
+Ten synthetic LAZ workflow tests passed:
+  deterministic display sampling: 100,000 input points, bounded budgets and tiny-instance retention
   area definition against a known rectangle
   batch object export and per-file failure isolation
   feature invariance under coordinate translation
@@ -22,3 +23,5 @@ GUI smoke validation:
 
 These are software functionality checks. No real-world object-detection AP,
 instance IoU, acceptance threshold or trained underwater production model is claimed.
+
+Object Detection UI verified with 1,000 / 5,000 / 10,000 / 30,000 point budgets. New saved caches are sampled before writing; source-point mapping and full-resolution exports remain intact.
