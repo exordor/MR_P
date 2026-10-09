@@ -1,0 +1,8 @@
+{
+  "classes": {"0": "background", "1": "target"},
+  "datasets": [
+    {"path": "data/train_site.laz", "labels": "data/train_site.labels.csv", "split": "train", "scene_id": "independent_site_A"},
+    {"path": "data/validation_site.laz", "labels": "data/validation_site.labels.csv", "split": "validation", "scene_id": "independent_site_B"},
+    {"path": "data/test_site.laz", "labels": "data/test_site.labels.csv", "split": "test", "scene_id": "independent_site_C"}
+  ]
+}
