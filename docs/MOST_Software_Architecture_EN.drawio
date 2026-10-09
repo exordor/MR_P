@@ -1,0 +1,62 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="app.diagrams.net" type="device">
+  <diagram name="MOST Simple Software Architecture" id="most-simple-architecture-en">
+    <mxGraphModel grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1660" pageHeight="920">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="MOST Robotics | YellowScan LAZ Underwater Object Detection" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae6f0;strokeColor=#aec1d0;fontColor=#17354d;fontSize=26;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="50" y="25" width="1560" height="65" />
+        </mxCell>
+        <mxCell id="ui" value="Desktop interface and job queue&#10;&#10;Select files, models and settings | Train and evaluate | Process one file or a batch&#10;View | Show objects | Select object IDs | Progress and error log" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#e8eafa;strokeColor=#aec1d0;fontColor=#17354d;fontSize=17;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="50" y="120" width="1560" height="110" />
+        </mxCell>
+        <mxCell id="io" value="1  Import and validate&#10;&#10;LAS / LAZ&#10;laspy + lazrs + pyproj&#10;Fields, CRS and metric units&#10;Keep original points and indices" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dceefa;strokeColor=#aec1d0;fontColor=#17354d;fontSize=17;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="50" y="310" width="280" height="190" />
+        </mxCell>
+        <mxCell id="features" value="2  Prepare features&#10;&#10;NumPy + SciPy&#10;Local geometry and intensity&#10;Return structure and scan angle&#10;Full resolution for processing" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dceefa;strokeColor=#aec1d0;fontColor=#17354d;fontSize=17;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="370" y="310" width="280" height="190" />
+        </mxCell>
+        <mxCell id="model" value="3  Model inference&#10;&#10;scikit-learn&#10;Random Forest (default)&#10;MLP feature network (optional)&#10;Point classes and class scores" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#ddefe2;strokeColor=#aec1d0;fontColor=#17354d;fontSize=17;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="690" y="310" width="280" height="190" />
+        </mxCell>
+        <mxCell id="instances" value="4  Instances and IDs&#10;&#10;Per-class DBSCAN&#10;IDs, point counts and centroids&#10;Intensity and confidence&#10;Area requires an agreed method" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#ddefe2;strokeColor=#aec1d0;fontColor=#17354d;fontSize=17;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1010" y="310" width="280" height="190" />
+        </mxCell>
+        <mxCell id="exports" value="5  Export and cache&#10;&#10;XYZ CSV for each object&#10;report.csv for each dataset&#10;JSON metadata and NPZ cache&#10;Reopen without rerunning" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff0d7;strokeColor=#aec1d0;fontColor=#17354d;fontSize=17;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1330" y="310" width="280" height="190" />
+        </mxCell>
+        <mxCell id="train" value="Supervised training and model management&#10;&#10;Annotate independent scenes and separate train / validation / test data&#10;Extract features, train RF / MLP, validate, and save the model with its configuration&#10;Test evaluation starts explicitly; annotation editing is outside this prototype" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#ddefe2;strokeColor=#aec1d0;fontColor=#17354d;fontSize=17;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="50" y="590" width="920" height="150" />
+        </mxCell>
+        <mxCell id="viewer" value="Interactive 3D viewer (Matplotlib)&#10;&#10;Read saved cache | Rotate, zoom and pan&#10;Toggle instance colours | Select the matching object ID&#10;Display sampling only; exports use all assigned original points" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff0d7;strokeColor=#aec1d0;fontColor=#17354d;fontSize=17;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1010" y="590" width="600" height="150" />
+        </mxCell>
+        <mxCell id="e0" source="ui" target="model" parent="1" edge="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;strokeColor=#55748b;strokeWidth=2;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e1" source="io" target="features" parent="1" edge="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;strokeColor=#55748b;strokeWidth=2;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e2" source="features" target="model" parent="1" edge="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;strokeColor=#55748b;strokeWidth=2;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e3" source="model" target="instances" parent="1" edge="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;strokeColor=#55748b;strokeWidth=2;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e4" source="instances" target="exports" parent="1" edge="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;strokeColor=#55748b;strokeWidth=2;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e5" source="train" target="model" parent="1" edge="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;strokeColor=#55748b;strokeWidth=2;exitX=0.847826;exitY=0;entryX=0.5;entryY=1;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e6" source="exports" target="viewer" parent="1" edge="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;strokeColor=#55748b;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.766667;entryY=0;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="note" value="Scope and next steps&#10;&#10;Prototype: one local process; no server or database. RF / MLP are integrated; Pointcept and SoftGroup are not.&#10;Next: real YellowScan validation, deep point-cloud models, waveform decoding, large-cloud tiling and Linux acceptance testing." style="rounded=1;whiteSpace=wrap;html=0;fillColor=#f4f6f9;strokeColor=#aec1d0;fontColor=#17354d;fontSize=16;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="50" y="790" width="1560" height="110" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

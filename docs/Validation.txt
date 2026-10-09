@@ -1,0 +1,24 @@
+Functional validation record
+Date: 9 October 2026
+
+Environment: Windows build 26100, Python 3.11.9, Tk 8.6.12.
+Pinned dependency versions are listed in requirements.txt.
+Linux installation and real YellowScan recognition have not been validated.
+
+Nine synthetic LAZ workflow tests passed:
+  area definition against a known rectangle
+  batch object export and per-file failure isolation
+  feature invariance under coordinate translation
+  global instance consistency across an arbitrary tile line
+  model reload, held-out test evaluation and MLP backend
+  no-object success distinguished from failure
+  model and test-data relocation
+  scene-ID and identical-file leakage checks
+  metric-unit checks, point limits and no model overwrite
+
+GUI smoke validation:
+  English interface creation, saved-result loading, View,
+  Show objects toggling, object ID selection and figure rendering.
+
+These are software functionality checks. No real-world object-detection AP,
+instance IoU, acceptance threshold or trained underwater production model is claimed.
