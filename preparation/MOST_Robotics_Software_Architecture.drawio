@@ -1,0 +1,98 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="app.diagrams.net" type="device">
+  <diagram name="Software Architecture" id="most-architecture">
+    <mxGraphModel dx="1800" dy="1100" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1800" pageHeight="1100" arrows="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="MOST Robotics | Underwater Object Detection Software&#10;Draft editable architecture — requirements v0.1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#16324f;strokeColor=#16324f;fontSize=22;fontFamily=Arial;spacing=12;fontColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1720" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="input" value="MOST ROBOTICS INPUTS&#10;LAS / LAZ point clouds&#10;Associated full-waveform data&#10;Dataset purpose and location" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="180" width="260" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="import" value="IMPORT &amp; VALIDATION&#10;Read points / waveform links&#10;Check fields and coordinates&#10;Keep source identifiers" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="350" y="180" width="255" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="prep" value="PREPROCESSING&#10;Framework-specific features&#10;Tiling / normalisation&#10;Preserve original-point mapping" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="655" y="180" width="280" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="ui" value="USER INTERFACE &amp; JOB CONTROL&#10;Training / model selection&#10;Single or batch processing&#10;Settings, progress and error log&#10;GUI / CLI choice: to be agreed" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="110" width="330" height="165" as="geometry" />
+        </mxCell>
+        <mxCell id="annotation" value="TRAINING DATA PREPARATION&#10;Annotations required for&#10;supervised training&#10;Responsibility / effort: to be agreed&#10;Separate train / validation / test" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="350" y="415" width="255" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="train" value="TRAINING MODULE&#10;Selected deep-learning framework&#10;Training / validation&#10;Save model and configuration" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="655" y="415" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="registry" value="MODEL STORAGE&#10;Weights + version&#10;Classes + preprocessing settings" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="990" y="440" width="255" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="infer" value="AI INFERENCE&#10;Load trained model&#10;Predict classes / scores&#10;Single or batch datasets" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="1450" y="345" width="300" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="objects" value="OBJECT SEGMENTATION&#10;Group points into instances&#10;Reconcile tile boundaries&#10;Assign unique object IDs" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="1450" y="570" width="300" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="measure" value="OBJECT MEASUREMENTS&#10;Centroid x / y / z + point count&#10;Intensity summary + area&#10;Object confidence&#10;Definitions require agreement" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="710" width="310" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="exports" value="EXPORTS &amp; REPORTS&#10;Segmented object point clouds&#10;CSV detection report (proposed)&#10;Source mapping + run metadata" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="655" y="750" width="310" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="schema" value="PROPOSED REPORT COLUMNS&#10;object ID | x | y | z | Nr_of_points | Intensity | Area | confidence" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#f5f5f5;strokeColor=#666666;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="770" width="540" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="platform" value="CROSS-PLATFORM PACKAGING&#10;Windows + Linux installers / environment setup&#10;Supported OS versions, GPU/CPU and dependencies to be agreed" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="950" width="850" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="qa" value="VALIDATION &amp; CLIENT REVIEW&#10;Held-out data / expert review; check measurements and exports&#10;Confirm report format, area definition and deployment requirements" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="940" y="950" width="810" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="input" target="import">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="import" target="prep">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="training branch" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="prep" target="annotation">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="annotation" target="train">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="train" target="registry">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="trained model" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="registry" target="infer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="prepared inputs" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="prep" target="infer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="run jobs" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="ui" target="infer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="configure training" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="ui" target="train">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="infer" target="objects">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="objects" target="measure">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="measure" target="exports">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="exports" target="schema">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" value="review outputs" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="exports" target="qa">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
