@@ -1,0 +1,179 @@
+﻿Ratman project — SOFTWARE REQUIREMENTS
+Underwater Object Detection and Segmentation in 3D Point Clouds
+Version: 0.2 | Status: Draft for joint review
+Prepared for: Ratman project and TU Clausthal
+
+1. PURPOSE
+Develop software that integrates a selected deep-learning framework to train
+models and automatically detect and segment underwater objects in 3D point
+clouds. The software shall calculate object properties, export segmented
+objects and generate a structured detection report.
+
+2. INPUT DATA AND CLIENT CONTRIBUTIONS
+REQ-01 Ratman project shall provide georeferenced 3D point-cloud datasets in
+       LAS (*.las) or LAZ (*.laz) format and their associated full-waveform data.
+       If waveform samples are stored separately, the associated files and
+       information linking them to the point clouds shall also be provided.
+REQ-02 Dataset descriptions shall identify the intended use of each dataset
+       (training or testing) and its acquisition location where relevant.
+REQ-03 Existing coordinate-reference and sensor information shall be reused.
+       Coordinate units and the vertical reference shall be recorded.
+REQ-04 The agreed underwater target-object categories shall define the scope
+       of detection and segmentation.
+REQ-05 The supplied point clouds are currently unlabelled. Before supervised
+       training, the required annotations, annotation responsibility, effort
+       and quality checks shall be agreed. Annotation work is not assumed to
+       be completed by Ratman project or automatically included in this draft.
+
+3. DATA PREPARATION AND MODEL TRAINING
+REQ-06 The software shall import LAS/LAZ point clouds, check required attributes
+       and waveform availability, and report unsupported or incomplete inputs.
+REQ-07 Data preparation shall produce inputs suitable for the selected
+       deep-learning framework while preserving the mapping to the original
+       points and georeferenced coordinates.
+REQ-08 The software shall support model training using the agreed training
+       data and annotations, with configurable training parameters.
+REQ-09 Training, validation and test data shall be separated to avoid leakage.
+       Validation data shall support model selection; test data shall support
+       independent evaluation. The actual split shall be agreed.
+REQ-10 Trained models shall be saved and reloadable together with the model
+       version, class definitions and required preprocessing configuration.
+REQ-11 The framework, model architecture, use of pretrained weights, waveform
+       representation and training strategy shall be selected during method
+       assessment. No particular framework or accuracy level is prescribed.
+
+4. AI DETECTION AND OBJECT SEGMENTATION
+REQ-12 The software shall load a trained model and run inference on new data.
+REQ-13 The software shall detect the agreed target objects and assign points
+       to individual object instances. A class prediction alone is insufficient
+       for generating separate object records.
+REQ-14 Each detected object shall receive a unique object ID within the run.
+       Objects crossing processing-tile boundaries shall be reconciled to
+       avoid duplicate records and inconsistent point counts.
+REQ-15 The software shall calculate one object-level confidence value per
+       detected object. The score definition, any point-to-object aggregation,
+       and filtering threshold shall be documented and agreed. Confidence
+       shall not be presented as measured detection accuracy.
+
+5. OBJECT PROPERTIES
+REQ-16 The software shall calculate the following for each segmented object:
+       - x, y, z: arithmetic mean of the coordinates of all points assigned to
+         the object (point-cloud centroid), in the agreed coordinate system.
+         This is not automatically the physical centre of the real object.
+       - Nr_of_points: number of points assigned to the exported object.
+       - Intensity: one summary intensity value for the object's points.
+         Proposed default: arithmetic mean of valid input intensity values.
+         The final definition and treatment of missing values require approval.
+       - Area: object area in square metres, using an agreed definition.
+         Open decision: horizontal projected footprint or 3D surface area.
+         The reconstruction/projection method and parameters must be agreed;
+         area shall not be calculated using an undocumented default.
+       - confidence: the object-level score specified in REQ-15.
+REQ-17 Property calculations shall use the final object segmentation at the
+       agreed output resolution. Any downsampling affecting these quantities
+       shall be documented. Missing attributes shall be explicitly flagged,
+       rather than silently replaced with zero.
+
+6. SINGLE AND BATCH PROCESSING
+REQ-18 The software shall support processing one input dataset at a time.
+REQ-19 The software shall also support processing multiple datasets in a batch
+       using a selected model and processing configuration.
+REQ-20 Batch processing shall retain source-dataset identification for every
+       object, record per-dataset completion/failure status and report errors.
+       An invalid input shall not silently invalidate the entire batch.
+
+7. EXPORTS AND REPORTS
+REQ-21 In addition to the detection report, the software shall export each
+       detected object's 3D point cloud as a separate CSV file named
+       <object_ID>.csv, using the same detection ID as in the report and viewer.
+       Each row shall represent one point and include at least x, y and z in
+       the original georeferenced coordinate system. Additional point attributes
+       shall be agreed. Object IDs shall be unique across the entire batch so
+       that object exports cannot overwrite one another.
+REQ-22 The software shall generate a machine-readable detection report with
+       one row per detected object and the following proposed column order:
+
+       object ID | x | y | z | Nr_of_points | Intensity | Area | confidence
+
+REQ-23 CSV is the proposed report format. Ratman project shall approve the
+       final format, headings, numeric precision, units and missing-value
+       representation before implementation is finalised.
+REQ-24 Source-dataset mapping shall be maintained through per-dataset reports
+       or an additional source field in a consolidated batch report. This
+       choice shall be agreed without changing the proposed columns silently.
+REQ-25 A run summary or accompanying metadata file shall record the model
+       version, processing settings, coordinate reference, area/intensity/
+       confidence definitions and processing errors. A zero-detection result
+       shall be clearly distinguishable from a failed processing run.
+
+REQ-34 Each processing run shall create one results folder named
+       <input_file_stem>_<YYYYMMDD_HHMMSS>, using the run start time and the
+       input filename without its extension. For single processing, use the
+       current input filename. For batch processing, create one shared results
+       folder for the whole batch, using the first file in the batch input
+       list as the representative filename. Save reports, object CSV files
+       and run metadata within this folder, with separate subfolders as needed.
+       If a folder name already exists, append a unique suffix; never overwrite
+       a previous run. Example: survey01_20260921_143025/objects/0001.csv.
+
+8. PLATFORM AND PACKAGING
+REQ-26 The software shall support installation and execution on both Windows
+       and Linux. Supported OS versions and the CPU/GPU requirements for
+       training and inference shall be agreed and documented.
+REQ-27 The selected framework and its dependencies shall be integrated into
+       a reproducible installation procedure for each supported platform.
+REQ-28 The software shall provide a graphical interface with the View and
+       Show objects controls specified below. Training, model selection,
+       single/batch inference and export settings shall be accessible through
+       the software interface. Any additional command-line interface is optional
+       and shall be agreed.
+
+8.1 POST-PROCESSING POINT-CLOUD VISUALISATION
+REQ-35 After processing has completed successfully, the user shall be able to
+       click View to display the processed point cloud in an interactive 3D
+       viewer supporting rotation, zoom and pan. The viewer shall display
+       completed results without requiring processing to run again. In batch
+       mode, the user shall be able to select a successfully processed dataset.
+REQ-36 After opening the point cloud, clicking Show objects shall highlight
+       detected object points in colours distinct from the background cloud.
+       Different object instances shall use distinguishable colours, with IDs
+       available through a legend or selection. Users shall be able to toggle
+       this highlighting off and on. Viewer IDs shall match the detection
+       report and exported object CSV filenames. If no objects were detected,
+       the viewer shall explicitly indicate this.
+
+9. VALIDATION AND ACCEPTANCE
+REQ-29 Verification shall cover import, training/model reload, instance
+       segmentation, single/batch execution, property calculations and exports.
+       Checks shall also cover View/Show objects, matching object IDs across
+       outputs, CSV point counts and run-folder naming in single/batch modes.
+REQ-30 Object IDs, point counts and centroid calculations shall be checked
+       against exported object points. Area calculations shall be checked
+       against agreed reference cases under the chosen area definition.
+REQ-31 Detection and segmentation quality shall be assessed on held-out data
+       using reference annotations or agreed expert review. Quantitative
+       metrics and acceptance thresholds shall be agreed before final testing.
+REQ-32 Installation and agreed workflows shall be verified on the approved
+       Windows and Linux environments.
+REQ-33 Ratman project shall confirm the proposed report format/content and
+       deployment requirements. TU Clausthal shall implement the agreed design.
+
+10. DELIVERABLES
+- Software package with training, single/batch inference and result visualisation.
+- Trained model and its associated configuration.
+- Per-object CSV point-cloud exports and detection reports for the agreed test data.
+- Installation and usage instructions, and a final project report.
+- Editable software architecture diagram in diagrams.net/draw.io format.
+
+11. DECISIONS STILL REQUIRED
+- Annotation responsibility, annotation effort and dataset split.
+- Deep-learning framework, training strategy and waveform input representation.
+- Area definition and calculation method.
+- Intensity summary, confidence definition and confidence threshold.
+- Report format, additional point CSV attributes, source mapping and precision.
+- Detailed graphical interface design, optional CLI, OS versions and hardware requirements.
+- Dataset size limits and quantitative acceptance criteria.
+
+This document is a draft technical specification. It does not revise the
+existing quotation, staffing allocation or delivery schedule. Any additional
+work implied by the agreed requirements must be reconciled with that scope.

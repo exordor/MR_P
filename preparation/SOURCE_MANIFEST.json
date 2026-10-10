@@ -1,0 +1,26 @@
+{
+  "project": "Ratman project",
+  "note": "Repository copies rebranded at user request; desktop source documents remain unchanged.",
+  "files": [
+    {
+      "repository_path": "preparation/Ratman_Project_Requirements.txt",
+      "sha256": "1334e6546ea37c49ab37fad478f999f944490e422b3bc07b97797afc919c2afc",
+      "preserved_unchanged": false
+    },
+    {
+      "repository_path": "preparation/Ratman_Project_Requirements_ZH.txt",
+      "sha256": "9bf93d2cc13d6218f39d8198d8715b6a2f8b4ff290541479be1d283dddeb3b0c",
+      "preserved_unchanged": false
+    },
+    {
+      "repository_path": "preparation/Ratman_Project_Software_Architecture.drawio",
+      "sha256": "b7e200ae3ad4bf138c5db6cdccce1df6da77231441d11c7a99f4e67f31b4cd82",
+      "preserved_unchanged": false
+    },
+    {
+      "repository_path": "preparation/Ratman_Project_数据结构与2m水下目标识别应用报告.docx",
+      "sha256": "7747698ec44f51af801c2c3f9534c68a10cb67c1cb457e91d3c764053905fb02",
+      "preserved_unchanged": false
+    }
+  ]
+}
