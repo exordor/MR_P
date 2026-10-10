@@ -1,14 +1,16 @@
-# Object Detection
+# Ratman project
 
-A small offline desktop prototype for detecting and separating underwater objects in georeferenced YellowScan LAS/LAZ point clouds. The current implementation uses a Random Forest baseline, an optional MLP feature network, and per-class DBSCAN instance grouping.
+Object Detection
 
-This is a research prototype. Real YellowScan detection performance, waveform processing and Linux deployment have not yet been validated. Pointcept and SoftGroup are assessed as future options; neither is integrated.
+A small offline desktop prototype for detecting and separating underwater objects in georeferenced Ratman project LAS/LAZ point clouds. The current implementation uses a Random Forest baseline, an optional MLP feature network, and per-class DBSCAN instance grouping.
+
+This is a research prototype. Real Ratman project detection performance, waveform processing and Linux deployment have not yet been validated. Pointcept and SoftGroup are assessed as future options; neither is integrated.
 
 ## Software architecture
 
-![English software architecture](docs/MOST_Software_Architecture_EN.png)
+![English software architecture](docs/Ratman_Project_Software_Architecture_EN.png)
 
-The architecture is fully editable in [diagrams.net](docs/MOST_Software_Architecture_EN.drawio). An [SVG version](docs/MOST_Software_Architecture_EN.svg) and [architecture notes](docs/Software_Architecture.md) are included.
+The architecture is fully editable in [diagrams.net](docs/Ratman_Project_Software_Architecture_EN.drawio). An [SVG version](docs/Ratman_Project_Software_Architecture_EN.svg) and [architecture notes](docs/Software_Architecture.md) are included.
 
 ## Installation
 
@@ -35,11 +37,11 @@ From the project directory after installation, generate and train an explicitly 
 
 On Linux, use `.venv/bin/python` instead. Start the application and click **Synthetic demo**. The button opens the saved demonstration result; it does not run training automatically. Use a new destination name when regenerating the data.
 
-The demonstration contains no real YellowScan measurements. Its trained model and metrics provide no evidence of real-world underwater recognition performance.
+The demonstration contains no real Ratman project measurements. Its trained model and metrics provide no evidence of real-world underwater recognition performance.
 
 ## Real data workflow
 
-1. Export appropriately georeferenced and corrected LAS/LAZ data from CloudStation. The prototype does not process YellowScan RAW, reconstruct trajectories or perform underwater refraction correction.
+1. Export appropriately georeferenced and corrected LAS/LAZ data from CloudStation. The prototype does not process Ratman project RAW, reconstruct trajectories or perform underwater refraction correction.
 2. Confirm that X, Y and Z are in metres. Supply the known projected CRS if it is absent from the LAS header. This setting records the CRS and does not reproject coordinates. Geographic or non-metric horizontal coordinates are rejected.
 3. Prepare labels in `point_index,class_id` CSV files. Indices refer to the original zero-based point-record order. Class 0 is background, positive integers are target classes, and blank or -1 means unlabelled. External annotation tools must preserve or recover this mapping.
 4. Create a dataset manifest using `manifest_example.json`. Separate independent scenes or non-overlapping regions into train, validation and test sets. Use the same `scene_id` for overlapping data; the software checks duplicate paths, identical file content and cross-split scene IDs, but cannot prove that different files do not overlap spatially.
@@ -88,12 +90,12 @@ Full-waveform samples are not decoded or used. The importer records some wavefor
 
 ## Requirements and method assessment
 
-- [Original English requirements v0.2](preparation/MOST_Robotics_Requirements.txt)
+- [English requirements v0.2](preparation/Ratman_Project_Requirements.txt)
 - [GitHub method assessment](docs/Model_Assessment.md)
-- [English data notes](docs/YellowScan_Data_Notes.md)
+- [English data notes](docs/Ratman_Project_Data_Notes.md)
 - [Functional validation record](docs/Validation.txt)
 
-All four supplied `preparation` files are preserved unchanged in `preparation/`. This includes the original Chinese source report and Chinese requirements translation. Client-facing software, current architecture and explanatory documentation are in English. The original supplied architecture is a legacy source document; use the current architecture in `docs/` for this implementation.
+The four supplied `preparation` documents are included in `preparation/` with project names updated to Ratman project. This includes the original Chinese source report and Chinese requirements translation. Client-facing software, current architecture and explanatory documentation are in English. The original supplied architecture is a legacy source document; use the current architecture in `docs/` for this implementation.
 
 ## Verification
 
