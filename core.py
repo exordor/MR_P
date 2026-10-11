@@ -19,6 +19,7 @@ import laspy
 import numpy as np
 import sklearn
 from pyproj import CRS
+from scipy.ndimage import generic_filter
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import ConvexHull, QhullError, cKDTree
@@ -39,7 +40,19 @@ WORKERS = os.cpu_count() or 1
 HEADERS = ["object ID", "x", "y", "z", "Nr_of_points", "Intensity", "Area", "confidence"]
 FEATURES = ["local_height", "roughness", "linearity", "planarity", "sphericity",
             "radius", "relative_intensity", "raw_intensity_scaled", "return_position",
-            "multi_return", "last_return", "scan_angle", "return_missing"]
+            "multi_return", "last_return", "scan_angle", "return_missing",
+            "height_above_bed", "bed_known", "las_bathymetric_bottom", "las_water_surface",
+            "las_water_column", "las_ground", "las_noise"]
+# ASPRS LAS 1.4 classification codes (including the topo-bathy codes YellowScan uses).
+# Input codes are kept on every point the model does not mark as a target.
+LAS_CLASSES = {0: "never classified", 1: "unassigned", 2: "ground", 3: "low vegetation",
+               4: "medium vegetation", 5: "high vegetation", 6: "building", 7: "low noise",
+               9: "water", 17: "bridge deck", 18: "high noise", 40: "bathymetric bottom",
+               41: "water surface", 42: "derived water surface", 43: "submerged object",
+               44: "IHO S-57 object", 45: "water column"}
+USER_CLASS_MIN = 64  # 64..255 are user-definable; trained target classes should use these codes.
+BED_CELL = 1.0  # metres; grid used to estimate the local riverbed / seabed surface.
+BED_WINDOW = 5  # cells; median over this window, so objects up to ~2 m do not lift the bed.
 
 
 @dataclass
@@ -196,6 +209,7 @@ def read_cloud(path, cfg):
         "return_number": np.asarray(cloud.return_number, dtype=np.float64),
         "number_of_returns": np.asarray(cloud.number_of_returns, dtype=np.float64),
         "scan_angle": angle,
+        "classification": np.asarray(cloud.classification, dtype=np.uint8),
         "info": {"source": str(path.resolve()), "point_count": len(xyz),
                  "las_version": str(header.version), "point_format": header.point_format.id,
                  "crs": selected_crs.to_string(), "crs_wkt": selected_crs.to_wkt(),
@@ -205,9 +219,42 @@ def read_cloud(path, cfg):
     }
 
 
+def bed_height(xyz, classification):
+    """Height of each point above the local bathymetric bottom (LAS class 40) and whether it is known.
+
+    Bottom points are binned into BED_CELL cells; each cell's median Z is smoothed by a BED_WINDOW median,
+    so a target lying on the bed does not raise the bed estimate beneath itself.
+    """
+    bed = classification == 40
+    height, known = np.zeros(len(xyz), dtype=np.float64), np.zeros(len(xyz), dtype=bool)
+    if bed.sum() < 10:
+        return height, known
+    low = xyz[bed, :2].min(axis=0)
+    cell = np.floor((xyz[:, :2] - low) / BED_CELL).astype(np.int64)
+    shape = cell[bed].max(axis=0) + 1
+    order = np.lexsort((xyz[bed, 2], cell[bed, 1], cell[bed, 0]))
+    flat = (cell[bed, 0] * shape[1] + cell[bed, 1])[order]
+    z = xyz[bed, 2][order]
+    starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
+    counts = np.diff(np.r_[starts, len(flat)])
+    grid = np.full(shape[0] * shape[1], np.nan)
+    grid[flat[starts]] = z[starts + counts // 2]  # Z is sorted within each cell: middle value is the median.
+    grid = grid.reshape(shape)
+    smooth = generic_filter(grid, lambda v: np.nan if np.isnan(v).all() else np.nanmedian(v),
+                            size=BED_WINDOW, mode="constant", cval=np.nan)
+    inside = (cell >= 0).all(axis=1) & (cell[:, 0] < shape[0]) & (cell[:, 1] < shape[1])
+    surface = np.full(len(xyz), np.nan)
+    surface[inside] = smooth[cell[inside, 0], cell[inside, 1]]
+    known = np.isfinite(surface)
+    height[known] = xyz[known, 2] - surface[known]
+    return np.clip(height, -5, 5), known
+
+
 def extract_features(cloud, neighbors=20, log=None):
     """Full resolution; chunks bound the N*k temporaries and run on all CPU cores."""
     xyz = cloud["xyz"]
+    classification = cloud.get("classification", np.zeros(len(xyz), dtype=np.uint8))
+    above_bed, bed_known = bed_height(xyz, classification)
     local = xyz - xyz[0]
     tree = cKDTree(local)
     k = min(neighbors, len(xyz))
@@ -234,6 +281,7 @@ def extract_features(cloud, neighbors=20, log=None):
             np.where(invalid, 0, (r - 1) / np.maximum(n - 1, 1)),
             (~invalid & (n > 1)), (~invalid & (r == n)),
             cloud["scan_angle"][start:stop] / 90, invalid,
+            above_bed[start:stop], bed_known[start:stop], *class_flags(classification[start:stop]),
         ))
     starts = range(0, len(xyz), 8192)
     # Threads share the arrays; numpy/scipy release the GIL, and slices are disjoint.
@@ -246,6 +294,11 @@ def extract_features(cloud, neighbors=20, log=None):
     return features
 
 
+def class_flags(codes):
+    """Vendor LAS classes the model can use: bottom, water surface, water column, ground, noise."""
+    return (codes == 40, np.isin(codes, (9, 41, 42)), codes == 45, codes == 2, np.isin(codes, (7, 18)))
+
+
 def label_template(path, output, cfg):
     cloud = read_cloud(path, cfg)
     with Path(output).open("x", newline="", encoding="utf-8-sig") as stream:
@@ -255,7 +308,17 @@ def label_template(path, output, cfg):
     return cloud["info"]
 
 
-def load_labels(path, count):
+def load_labels(path, count, targets=None):
+    """point_index,class_id CSV, or a LAS/LAZ whose classification field marks the targets.
+
+    In a LAS/LAZ label file every point whose code is one of the manifest's target classes is that target;
+    all other points are background (0), whatever their vendor class.
+    """
+    if Path(path).suffix.lower() in (".las", ".laz"):
+        codes = np.asarray(laspy.read(path).classification, dtype=np.int32)
+        if len(codes) != count:
+            raise ValueError("Label LAS/LAZ has a different point count from its point cloud")
+        return np.where(np.isin(codes, list(targets or ())), codes, 0)
     labels = np.full(count, -1, dtype=np.int32)
     seen = set()
     with Path(path).open(newline="", encoding="utf-8-sig") as stream:
@@ -280,8 +343,8 @@ def load_manifest(path):
     path = Path(path)
     manifest = json.loads(path.read_text(encoding="utf-8-sig"))
     classes = manifest.get("classes", {})
-    if "0" not in classes or len(classes) < 2 or any(int(c) < 0 for c in classes):
-        raise ValueError("classes must define 0=background and at least one positive target")
+    if "0" not in classes or len(classes) < 2 or any(not 0 <= int(c) <= 255 for c in classes):
+        raise ValueError("classes must define 0=background and at least one target code 1..255 (LAS classes)")
     records, groups, files, hashes = [], {}, set(), set()
     for entry in manifest["datasets"]:
         entry = dict(entry)
@@ -302,7 +365,10 @@ def load_manifest(path):
         records.append(entry)
     if set(e["split"] for e in records) != {"train", "validation", "test"}:
         raise ValueError("Provide separate train, validation and test datasets")
-    return {"classes": classes, "datasets": records}
+    balance = manifest.get("balance_classes", True)
+    if not isinstance(balance, bool):
+        raise ValueError("balance_classes must be true or false")
+    return {"classes": classes, "balance_classes": balance, "datasets": records}
 
 
 def metrics(y, pred, classes):
@@ -321,7 +387,7 @@ def collect(records, split, cfg, classes, log):
             continue
         log(f"{split}: {Path(record['path']).name}")
         cloud = read_cloud(record["path"], cfg)
-        labels = load_labels(record["labels"], len(cloud["xyz"]))
+        labels = load_labels(record["labels"], len(cloud["xyz"]), {int(k) for k in classes if int(k)})
         selected = labels >= 0
         if not selected.any():
             raise ValueError(f"No labels: {record['labels']}")
@@ -346,7 +412,8 @@ def train_model(manifest_path, output_path, cfg, backend="random_forest", iterat
     if set(np.unique(y)) != {int(k) for k in manifest["classes"]}:
         raise ValueError("Training data must contain every declared class, including background")
     if backend == "random_forest":
-        estimator = RandomForestClassifier(n_estimators=iterations, class_weight="balanced",
+        estimator = RandomForestClassifier(n_estimators=iterations,
+                                           class_weight="balanced" if manifest["balance_classes"] else None,
                                            min_samples_leaf=2, max_depth=24, random_state=42, n_jobs=2)
     elif backend == "mlp":
         estimator = make_pipeline(StandardScaler(), MLPClassifier(
@@ -372,6 +439,7 @@ def train_model(manifest_path, output_path, cfg, backend="random_forest", iterat
     payload = {"format": "MOST_ML_V1", "software_version": VERSION,
                "model_id": str(uuid.uuid4()), "created_at": datetime.now().astimezone().isoformat(),
                "backend": backend, "estimator": estimator, "classes": manifest["classes"],
+               "balance_classes": manifest["balance_classes"],
                "features": FEATURES, "neighbors": cfg.neighbors, "training_settings": asdict(cfg),
                "datasets": manifest["datasets"], "validation": validation,
                "training_warnings": training_warnings, "sklearn_version": sklearn.__version__}
@@ -523,11 +591,17 @@ def display_indices(instance, limit=DISPLAY_LIMIT, maximum=DISPLAY_LIMIT):
     return np.sort(np.concatenate((representatives, extra)))
 
 
-def web_indices(instance, limit=WEB_LIMIT):
-    """Browser sample: object points get at least half the budget, so objects stay dense."""
+def web_indices(instance, limit=WEB_LIMIT, keep=None):
+    """Browser sample: object points get at least half the budget, so objects stay dense.
+
+    keep: optional mask of further points to treat like object points (e.g. ground-truth targets).
+    """
     if len(instance) <= limit:
         return np.arange(len(instance))
-    objects, background = np.flatnonzero(instance > 0), np.flatnonzero(instance == 0)
+    important = instance > 0 if keep is None else (instance > 0) | keep
+    if keep is not None:  # Sample over the combined set; display_indices only needs group labels.
+        instance = np.where(instance > 0, instance, important.astype(instance.dtype) * (instance.max() + 1))
+    objects, background = np.flatnonzero(important), np.flatnonzero(~important)
     take_objects = min(len(objects), max(limit // 2, limit - len(background)))
     take_background = min(len(background), limit - take_objects)
     chosen = objects[display_indices(instance[objects], take_objects, len(objects))] if take_objects else objects[:0]
@@ -536,10 +610,12 @@ def web_indices(instance, limit=WEB_LIMIT):
 
 
 def write_web_view(dest, name, xyz, instance, objects, origin, total, predicted=None, class_names=None,
-                   intensity=None):
+                   intensity=None, las_classes=None, truth=None, truth_objects=None):
     """Self-contained offline HTML page drawing the points with WebGL (GPU).
 
-    predicted: class ID per point, class_names: {class ID: name}; intensity: raw LAS intensity per point.
+    predicted: class ID per point, class_names: {class ID: name}; intensity: raw LAS intensity per point;
+    las_classes: input LAS classification code per point; truth: per-point ground-truth status
+    (TRUTH_STATUS) and truth_objects: ground-truth targets, when the input has a ground-truth file.
     """
     def encode(array):
         return base64.b64encode(np.ascontiguousarray(array).tobytes()).decode("ascii")
@@ -555,6 +631,15 @@ def write_web_view(dest, name, xyz, instance, objects, origin, total, predicted=
         low, high = np.percentile(intensity, [2, 98])
         scaled = np.clip((intensity - low) / max(high - low, 1e-9) * 255, 0, 255)
         data["intensity"] = encode(scaled.astype(np.uint8))
+    if las_classes is not None:
+        codes = sorted(int(c) for c in np.unique(las_classes))
+        data["las"] = encode(np.asarray(las_classes, dtype=np.uint8))
+        data["las_names"] = [[c, LAS_CLASSES.get(c, "user-defined" if c >= USER_CLASS_MIN else "reserved")]
+                             for c in codes]
+    if truth is not None:
+        data["truth"] = encode(np.asarray(truth, dtype=np.uint8))
+        data["truth_objects"] = [[t["object_id"], t["class_name"], t["status"], *(np.asarray(t["center"]) - origin).tolist()]
+                                 for t in truth_objects]
     # "</" is escaped so no value can close the <script> element that holds the data.
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     page = WEB_TEMPLATE.read_text(encoding="utf-8").replace("/*DATA*/", payload, 1)
@@ -574,6 +659,112 @@ def refresh_web_view(page):
     if text[:start] == head and text[end:] == tail:
         return
     page.write_text(head + text[start:end] + tail, encoding="utf-8")
+
+
+TRUTH_STATUS = {0: "not a target", 1: "detected target", 2: "false alarm", 3: "missed target"}
+
+
+def truth_path(source):
+    """Ground truth for an input lives next to it: scene.laz -> scene.truth.json."""
+    return Path(source).with_suffix(".truth.json")
+
+
+def load_truth(path, count):
+    truth = json.loads(Path(path).read_text(encoding="utf-8"))
+    if truth.get("point_count") != count:
+        raise ValueError("Ground truth was made for a different point cloud (point count differs)")
+    instance = np.zeros(count, dtype=np.int32)
+    for number, target in enumerate(truth["objects"], 1):
+        if "point_range" in target:
+            start, stop = target["point_range"]
+            instance[start:stop] = number
+        else:
+            instance[np.asarray(target["point_indices"], dtype=np.int64)] = number
+    return truth["objects"], instance
+
+
+def evaluate_objects(point_instance, objects, targets, truth_instance, min_iou=0.25):
+    """Match detected objects to ground-truth targets one-to-one by point IoU (greedy, highest first).
+
+    A match needs IoU >= min_iou; it is class-correct when the detected class equals the target class.
+    Objects and targets are annotated in place; returns the summary and per-point TRUTH_STATUS.
+    """
+    detected = np.bincount(point_instance, minlength=len(objects) + 1)
+    true_size = np.bincount(truth_instance, minlength=len(targets) + 1)
+    both = (point_instance > 0) & (truth_instance > 0)
+    pairs, overlap = np.unique(np.stack((point_instance[both], truth_instance[both])), axis=1, return_counts=True)
+    iou = overlap / (detected[pairs[0]] + true_size[pairs[1]] - overlap)
+    match_target, match_object = {}, {}
+    for k in np.argsort(-iou, kind="stable"):
+        d, t = int(pairs[0, k]), int(pairs[1, k])
+        if iou[k] >= min_iou and d not in match_object and t not in match_target:
+            match_object[d], match_target[t] = (t, float(iou[k])), (d, float(iou[k]))
+    for obj in objects:
+        found = match_object.get(obj["instance_index"])
+        if found:
+            target = targets[found[0] - 1]
+            obj["truth"] = {"target_id": target["object_id"], "iou": found[1],
+                            "class_correct": obj["class_id"] == target["class_id"],
+                            "centre_error_m": float(np.linalg.norm(np.subtract(obj["centroid"], target["center"])))}
+        else:
+            obj["truth"] = {"target_id": None, "iou": 0.0, "class_correct": False, "centre_error_m": None}
+    for number, target in enumerate(targets, 1):
+        found = match_target.get(number)
+        target["visible_points"] = int(true_size[number])
+        target["status"] = "detected" if found else "missed"
+        target["detected_as"] = objects[found[0] - 1]["object_id"] if found else None
+        target["iou"] = found[1] if found else 0.0
+    status = np.zeros(len(point_instance), dtype=np.uint8)
+    status[truth_instance > 0] = 3
+    matched = np.zeros(len(objects) + 1, dtype=bool)
+    matched[list(match_object)] = True
+    status[point_instance > 0] = np.where(matched[point_instance[point_instance > 0]], 1, 2)
+    tp, fp, fn = len(match_object), len(objects) - len(match_object), len(targets) - len(match_object)
+    matches = [o["truth"] for o in objects if o["truth"]["target_id"]]
+    classes = sorted({t["class_name"] for t in targets})
+    summary = {
+        "targets": len(targets), "detections": len(objects), "true_positives": tp,
+        "false_positives": fp, "missed": fn,
+        "precision": tp / len(objects) if objects else None, "recall": tp / len(targets) if targets else None,
+        "f1": 2 * tp / (len(objects) + len(targets)) if objects or targets else None,
+        "class_correct": sum(m["class_correct"] for m in matches),
+        "mean_iou": float(np.mean([m["iou"] for m in matches])) if matches else None,
+        "mean_centre_error_m": float(np.mean([m["centre_error_m"] for m in matches])) if matches else None,
+        "recall_by_class": {c: sum(t["status"] == "detected" for t in targets if t["class_name"] == c)
+                            / sum(t["class_name"] == c for t in targets) for c in classes},
+        "recall_by_visible_points": {
+            label: f"{sum(t['status'] == 'detected' for t in group)}/{len(group)}"
+            for label, group in (("<8", [t for t in targets if t["visible_points"] < 8]),
+                                 ("8-19", [t for t in targets if 8 <= t["visible_points"] < 20]),
+                                 (">=20", [t for t in targets if t["visible_points"] >= 20])) if group},
+        "missed_targets": [t["object_id"] for t in targets if t["status"] == "missed"],
+        "matching": f"one-to-one, point IoU >= {min_iou}",
+    }
+    return summary, status
+
+
+POINT_FORMAT_WITH_FULL_CLASS = {0: 6, 1: 6, 2: 7, 3: 7, 4: 9, 5: 10}
+
+
+def write_classified(source, dest, groups, point_instance):
+    """Copy of the input with every attribute kept; detected target points get their target LAS class.
+
+    Points not in a detected object keep the input (vendor) class. An extra dimension object_instance
+    holds the object number (0 = none). Point formats 0-5 only store classes 0-31, so they are upgraded
+    to the matching LAS 1.4 format when a target code is larger.
+    """
+    las = laspy.read(source)
+    codes = np.asarray(las.classification, dtype=np.uint8).copy()
+    for cls, selected, _ in groups:
+        codes[selected] = cls
+    if las.header.point_format.id < 6 and codes.max() > 31:
+        las = laspy.convert(las, point_format_id=POINT_FORMAT_WITH_FULL_CLASS[las.header.point_format.id],
+                            file_version="1.4")
+    las.classification = codes
+    las.add_extra_dim(laspy.ExtraBytesParams(name="object_instance", type=np.uint32,
+                                             description="Detected object number, 0 = none"))
+    las.object_instance = point_instance.astype(np.uint32)
+    las.write(dest)
 
 
 # Rough share of a file's processing time per stage, for the progress bar.
@@ -600,7 +791,8 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
                    "Area": cfg.area_method,
                    "confidence": "mean winning-class point probability over final exported instance; uncalibrated",
                    "missing_value": "empty CSV cell / null JSON", "downsampling": "none for processing/export",
-                   "instance_method": "per-class global DBSCAN within each dataset; separate files are not merged"},
+                   "instance_method": "per-class global DBSCAN within each dataset; separate files are not merged",
+                   "classified_laz": "input copy; detected target points get their target LAS class, others keep the input class"},
                "platform": platform.platform(), "datasets": []}
     write_json(run / "run_metadata.json", summary)
     for number, path in enumerate(paths, 1):
@@ -659,10 +851,21 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
                 writer = csv.writer(stream)
                 writer.writerow(HEADERS)
                 writer.writerows(rows)
-            web = web_indices(point_instance)
+            write_classified(path, folder / "classified.laz", groups, point_instance)
+            truth_status, targets = None, None
+            if truth_path(path).exists():
+                targets, truth_instance = load_truth(truth_path(path), len(features))
+                summary_truth, truth_status = evaluate_objects(point_instance, objects, targets, truth_instance)
+                write_json(folder / "evaluation.json", {"source": str(truth_path(path)), "summary": summary_truth,
+                                                        "targets": targets})
+                entry["evaluation"] = summary_truth
+                log(f"{dataset_id}: ground truth: {summary_truth['true_positives']}/{len(targets)} targets found, "
+                    f"{summary_truth['false_positives']} false alarms")
+            web = web_indices(point_instance, keep=None if truth_status is None else truth_status > 0)
             write_web_view(folder / "view3d.html", Path(path).name, cloud["xyz"][web], point_instance[web],
                            objects, cloud["xyz"].mean(axis=0), len(features), classes[web], model["classes"],
-                           cloud["intensity"][web])
+                           cloud["intensity"][web], cloud["classification"][web],
+                           None if truth_status is None else truth_status[web], targets)
             entry["display"] = {"source_points": len(features), "shown_points": len(web), "limit": WEB_LIMIT,
                                 "page": "view3d.html", "method": "object points first, then random background"}
             write_json(folder / "objects.json", objects)
@@ -672,7 +875,7 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
             # Never expose partial outputs as successful objects.
             for dest in exported:
                 dest.unlink(missing_ok=True)
-            for filename in ("report.csv", "view3d.html", "objects.json"):
+            for filename in ("report.csv", "view3d.html", "objects.json", "classified.laz", "evaluation.json"):
                 (folder / filename).unlink(missing_ok=True)
             entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
             log(f"{dataset_id}: FAILED: {exc}")

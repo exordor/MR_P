@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt, QUrl, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -82,16 +83,27 @@ class InspectDialog(QDialog):
 
 class ObjectTable(QAbstractTableModel):
     """Detected objects; numbers stay numeric so column sorting is numeric."""
-    HEADERS = ["Object ID", "Class", "Points", "Confidence", "X", "Y", "Z"]
+    HEADERS = ["Object ID", "Class", "Points", "Confidence", "X", "Y", "Z", "Ground truth"]
+    TRUTH_TIP = ("Ground-truth target this object matches (point IoU = shared points / all points of both), "
+                 "or false alarm when it matches none. Shown only for inputs with a .truth.json file.")
 
     def __init__(self):
         super().__init__()
         self.rows = []
 
+    @staticmethod
+    def truth_text(o):
+        truth = o.get("truth")
+        if truth is None:
+            return ""
+        if not truth["target_id"]:
+            return "false alarm"
+        return f"{truth['target_id']} · IoU {truth['iou']:.2f}" + ("" if truth["class_correct"] else " · wrong class")
+
     def load(self, objects):
         self.beginResetModel()
-        self.rows = [(o["object_id"], o["class_name"], o["point_count"], o["confidence"], *o["centroid"])
-                     for o in objects]
+        self.rows = [(o["object_id"], f"{o['class_name']} ({o['class_id']})", o["point_count"], o["confidence"],
+                      *o["centroid"], self.truth_text(o)) for o in objects]
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
@@ -106,16 +118,20 @@ class ObjectTable(QAbstractTableModel):
         if role == Qt.DisplayRole:
             if column == 2:
                 return f"{value:,}"
-            return f"{value:.3f}" if column >= 3 else value
+            return f"{value:.3f}" if 3 <= column <= 6 else value
         if role == Qt.UserRole:  # Sort key.
             return value
-        if role == Qt.TextAlignmentRole and column >= 2:
+        if role == Qt.ForegroundRole and column == 7 and value:
+            return QColor("#c0392b") if value == "false alarm" or "wrong" in value else QColor("#1e8449")
+        if role == Qt.TextAlignmentRole and 2 <= column <= 6:
             return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
             return self.HEADERS[section]
+        if role == Qt.ToolTipRole and orientation == Qt.Horizontal and section == 7:
+            return self.TRUTH_TIP
         return None
 
 
@@ -235,7 +251,10 @@ class App(QMainWindow):
                 ("Inspect input", self.inspect, "Read only the file headers to quickly show point count, extent and CRS, and check whether each file can be processed."),
                 ("Process", self.process, "Run the selected model on every listed file to detect and segment objects, saving results to the results directory."),
                 ("Open saved results", self.open_run, "Open a results folder from an earlier run and show it in the table and 3D view."),
-                ("Synthetic demo", self.open_demo, "Open the bundled synthetic example and its results to get familiar with the window.")):
+                ("Synthetic demo", self.open_demo, "Open the bundled synthetic example and its results to get familiar with the window."),
+                ("Metal targets demo", self.open_metal_demo,
+                 "Open real YellowScan river scenes with simulated metal plates and spheres on the riverbed, "
+                 "the model trained on them and its results compared with the known targets.")):
             controls.addWidget(self.button(text, command, tip))
         controls.addStretch()
         layout.addLayout(controls)
@@ -267,6 +286,15 @@ class App(QMainWindow):
         self.reuse_button.setVisible(False)
         run_row.addWidget(self.reuse_button)
         layout.addLayout(run_row)
+        self.evaluation_note = QLabel("")
+        self.evaluation_note.setWordWrap(True)
+        self.evaluation_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.evaluation_note.setToolTip("Detected objects compared with the known (ground-truth) targets of this file.\n"
+                                        "A detection counts when it shares at least a quarter of its points with a target "
+                                        "(point IoU ≥ 0.25).\nType a missed target ID (e.g. T004) in the 3D view's "
+                                        "Find box to see it; colour by Truth to see all of them.")
+        self.evaluation_note.setVisible(False)
+        layout.addWidget(self.evaluation_note)
         splitter = QSplitter(Qt.Horizontal)
         table_side = QWidget()
         table_layout = QVBoxLayout(table_side)
@@ -557,6 +585,22 @@ class App(QMainWindow):
         if path:
             self.safe_action(lambda: self.load_run(path))
 
+    def open_metal_demo(self):
+        def action():
+            demo = Path(__file__).resolve().parent / "metal_demo"
+            candidates = sorted((demo / "results").glob("*/run_metadata.json"))
+            if not candidates:
+                raise ValueError("Metal targets demo missing; follow README to generate it.")
+            self.model_path.setText(str(demo / "METAL_MODEL.joblib"))
+            self.manifest_path.setText(str(demo / "manifest.json"))
+            self.clear_files()
+            self.paths = [str(demo / "DEVILS_BRIDGE.laz")]
+            self.inputs.addItem(self.paths[0])
+            self.load_run(candidates[-1].parent)
+            self.reuse_run_settings()
+            self.log("Loaded metal targets demo (real scenes, simulated targets).")
+        self.safe_action(action)
+
     def open_demo(self):
         def action():
             demo = Path(__file__).resolve().parent / "synthetic_demo"
@@ -596,6 +640,7 @@ class App(QMainWindow):
             self.view()
         else:
             self.objects.load([])
+            self.show_evaluation(None)
             self.web.setHtml("")
             self.view_note.setText("No datasets to view.")
 
@@ -664,6 +709,7 @@ class App(QMainWindow):
             if entry["status"] == "failed":
                 self.objects.load([])
                 self.reset_class_filter()
+                self.show_evaluation(None)
                 self.loaded_page = None
                 self.web.setHtml("")
                 error = entry.get("error", "unknown error")
@@ -672,6 +718,7 @@ class App(QMainWindow):
                 self.view_note.setToolTip(error)
                 return
             folder = self.run_path / entry["result_path"]
+            self.show_evaluation(entry.get("evaluation"))
             self.view_note.setToolTip("")
             self.objects.load(json.loads((folder / "objects.json").read_text(encoding="utf-8")))
             self.reset_class_filter()  # Also writes the point / object count note.
@@ -682,6 +729,28 @@ class App(QMainWindow):
                 # Loaded by URL: setHtml() is limited to 2 MB and the page can be tens of MB.
                 self.web.load(QUrl.fromLocalFile(str(page.resolve())))
         self.safe_action(action)
+
+    def show_evaluation(self, result):
+        if not result:
+            self.evaluation_note.setVisible(False)
+            return
+        def ratio(value):
+            return "–" if value is None else f"{value:.2f}"
+        missed = result["missed_targets"]
+        by_class = ", ".join(f"{name} {ratio(value)}" for name, value in result["recall_by_class"].items())
+        text = (f"<b>Ground truth:</b> {result['true_positives']} of {result['targets']} targets found "
+                f"(recall {ratio(result['recall'])}; {by_class}) · {result['false_positives']} false alarms "
+                f"(precision {ratio(result['precision'])}) · right class {result['class_correct']} of "
+                f"{result['true_positives']} · mean IoU {ratio(result['mean_iou'])}")
+        if result.get("recall_by_visible_points"):
+            text += " · found by points on target: " + ", ".join(
+                f"{k} pts {v}" for k, v in result["recall_by_visible_points"].items())
+        if result["mean_centre_error_m"] is not None:
+            text += f" · mean centre error {result['mean_centre_error_m']:.2f} m"
+        if missed:
+            text += f"<br>Missed: {', '.join(missed)}"
+        self.evaluation_note.setText(text)
+        self.evaluation_note.setVisible(True)
 
     def page_loaded(self, ok):
         if ok and self.sorted_objects.active():

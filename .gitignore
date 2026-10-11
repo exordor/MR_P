@@ -12,3 +12,4 @@ data/
 *.key
 *.log
 .DS_Store
+metal_demo/

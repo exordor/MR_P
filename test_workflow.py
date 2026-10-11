@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import laspy
 import numpy as np
 
 import core
@@ -236,6 +237,118 @@ class WorkflowTest(unittest.TestCase):
         cloud = read_cloud(self.manifest.parent / "SYNTHETIC_test.laz", self.cfg)
         shifted = {**cloud, "xyz": cloud["xyz"] + [10000, -10000, 5]}
         self.assertTrue(np.allclose(extract_features(cloud), extract_features(shifted), atol=1e-5))
+
+    def test_bed_height_ignores_a_small_target_on_the_bed(self):
+        grid = np.array([[x, y, 10.0] for x in np.arange(0, 10, 0.2) for y in np.arange(0, 10, 0.2)])
+        target = np.array([[5 + dx, 5 + dy, 10.5] for dx in (-0.2, 0, 0.2) for dy in (-0.2, 0, 0.2)])
+        xyz = np.vstack((grid, target))
+        height, known = core.bed_height(xyz, np.full(len(xyz), 40, dtype=np.uint8))
+        self.assertTrue(known.all())
+        np.testing.assert_allclose(height[len(grid):], 0.5, atol=1e-9)
+        height, known = core.bed_height(xyz, np.full(len(xyz), 2, dtype=np.uint8))
+        self.assertFalse(known.any())
+
+    def test_object_evaluation_matches_one_to_one(self):
+        point_instance = np.array([0, 1, 1, 1, 2, 2, 0, 0, 3, 3])
+        truth_instance = np.array([0, 1, 1, 1, 1, 0, 2, 2, 0, 0])
+        objects = [{"instance_index": i, "object_id": f"O{i}", "class_id": c, "centroid": [0, 0, 0]}
+                   for i, c in ((1, 64), (2, 64), (3, 65))]
+        targets = [{"object_id": "T1", "class_id": 64, "class_name": "metal_plate", "center": [0, 0, 1]},
+                   {"object_id": "T2", "class_id": 65, "class_name": "metal_sphere", "center": [0, 0, 0]}]
+        summary, status = core.evaluate_objects(point_instance, objects, targets, truth_instance)
+        self.assertEqual((summary["true_positives"], summary["false_positives"], summary["missed"]), (1, 2, 1))
+        self.assertEqual(objects[0]["truth"]["target_id"], "T1")
+        self.assertAlmostEqual(objects[0]["truth"]["iou"], 0.75)
+        self.assertTrue(objects[0]["truth"]["class_correct"])
+        self.assertIsNone(objects[1]["truth"]["target_id"])  # T1 is already taken by the better match.
+        self.assertEqual(summary["missed_targets"], ["T2"])
+        np.testing.assert_array_equal(status, [0, 1, 1, 1, 2, 2, 3, 3, 2, 2])
+
+    def test_classified_laz_keeps_input_classes_and_upgrades_old_formats(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        original = laspy.read(sample)
+        self.assertEqual(original.header.point_format.id, 3)  # Only classes 0-31 fit in this format.
+        original.classification = np.full(len(original.points), 2, dtype=np.uint8)
+        source = self.root / "classes.laz"
+        original.write(source)
+        selected = np.arange(5, 15)
+        instance = np.zeros(len(original.points), dtype=np.int32)
+        instance[selected] = 1
+        dest = self.root / "classified.laz"
+        core.write_classified(source, dest, [(64, selected, 0.9)], instance)
+        result = laspy.read(dest)
+        self.assertEqual(result.header.point_format.id, 7)
+        codes = np.asarray(result.classification)
+        self.assertTrue((codes[selected] == 64).all())
+        self.assertTrue((np.delete(codes, selected) == 2).all())
+        np.testing.assert_array_equal(result.object_instance, instance)
+        np.testing.assert_allclose(result.x, original.x)
+        np.testing.assert_array_equal(result.intensity, original.intensity)
+
+    def test_labels_from_las_classification(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        las = laspy.read(sample)
+        codes = np.full(len(las.points), 2, dtype=np.uint8)
+        codes[:7] = 1
+        las.classification = codes
+        path = self.root / "labels_as_las.laz"
+        las.write(path)
+        labels = core.load_labels(path, len(codes), {1})
+        np.testing.assert_array_equal(labels, np.where(codes == 1, 1, 0))
+        with self.assertRaisesRegex(ValueError, "point count"):
+            core.load_labels(path, len(codes) + 1, {1})
+
+    def test_ground_truth_evaluation_in_batch(self):
+        folder = self.root / "with_truth"
+        folder.mkdir()
+        sample = folder / "scene.laz"
+        shutil.copy2(self.manifest.parent / "SYNTHETIC_test.laz", sample)
+        count = len(read_cloud(sample, self.cfg)["xyz"])
+        # create_demo writes 1800 background points, then two objects of 140 points.
+        targets = [{"object_id": f"T{i}", "class_id": 1, "class_name": "synthetic_object",
+                    "center": [0, 0, 0], "point_range": [1800 + 140 * (i - 1), 1800 + 140 * i]} for i in (1, 2)]
+        targets.append({"object_id": "T3", "class_id": 1, "class_name": "synthetic_object",
+                        "center": [0, 0, 0], "point_indices": [0, 1, 2]})
+        core.truth_path(sample).write_text(json.dumps({"point_count": count, "objects": targets}))
+        run = Path(process_batch([sample], self.model, self.root / "truth_runs", self.cfg, log=lambda x: None))
+        metadata = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))
+        result = metadata["datasets"][0]["evaluation"]
+        self.assertEqual((result["true_positives"], result["missed"], result["false_positives"]), (2, 1, 0))
+        objects = json.loads((run / "datasets" / "D0001" / "objects.json").read_text(encoding="utf-8"))
+        self.assertEqual({o["truth"]["target_id"] for o in objects}, {"T1", "T2"})
+        data = web_data(run / "datasets" / "D0001")
+        self.assertEqual([t[0] for t in data["truth_objects"]], ["T1", "T2", "T3"])
+        self.assertEqual(len(base64.b64decode(data["las"])), count)
+        self.assertTrue((run / "datasets" / "D0001" / "classified.laz").exists())
+        core.truth_path(sample).write_text(json.dumps({"point_count": count + 1, "objects": targets}))
+        run = Path(process_batch([sample], self.model, self.root / "truth_runs", self.cfg, log=lambda x: None))
+        status = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))["datasets"][0]
+        self.assertEqual(status["status"], "failed")
+        self.assertIn("different point cloud", status["error"])
+
+    def test_synthetic_targets_on_a_flat_riverbed(self):
+        import synthetic_targets
+        header = laspy.LasHeader(point_format=7, version="1.4")
+        header.scales, header.offsets = [0.001] * 3, [700000, 6300000, 0]
+        las = laspy.LasData(header)
+        rng = np.random.default_rng(1)
+        n = 40 * 40 * 25
+        las.x, las.y = 700000 + rng.uniform(0, 40, n), 6300000 + rng.uniform(0, 40, n)
+        las.z = rng.normal(80, 0.01, n)
+        las.intensity = np.full(n, 1000, dtype=np.uint16)
+        las.classification = np.full(n, 40, dtype=np.uint8)
+        las.return_number = las.number_of_returns = np.ones(n, dtype=np.uint8)
+        out, labels, targets = synthetic_targets.inject(las, np.ones(n, dtype=bool), rng, 6, "test")
+        self.assertEqual(len(targets), 6)
+        self.assertEqual(len(labels), len(out.points))
+        for target in targets:
+            start, stop = target["point_range"]
+            self.assertTrue((labels[start:stop] == target["class_id"]).all())
+            self.assertGreater(np.min(np.asarray(out.z)[start:stop]), 79.9)
+            self.assertIn(target["class_name"], ("metal_plate", "metal_sphere"))
+        self.assertEqual(int((labels > 0).sum()), sum(t["simulated_points"] for t in targets))
+        self.assertLess(int((labels == 0).sum()), n + 6 * 30)  # The covered riverbed was removed.
+        self.assertGreater(np.median(np.asarray(out.intensity)[labels > 0]), 1000)
 
 
 if __name__ == "__main__":

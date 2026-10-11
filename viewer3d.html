@@ -43,13 +43,14 @@
 <header>
   <span class="name" id="title"></span>
   <span class="spacer"></span>
-  <label title="How points are coloured: by class, by object (one colour each), by height or by intensity.">Colour <select id="colour">
+  <label title="How points are coloured: by detected class, by object (one colour each), by the class stored in the input file (LAS class), by comparison with known targets (Truth), by height or by intensity.">Colour <select id="colour">
     <option value="class">Class</option><option value="objects">Objects</option>
+    <option value="las">LAS class</option><option value="truth">Truth</option>
     <option value="height">Height</option><option value="intensity">Intensity</option>
   </select></label>
   <label title="Point size. Drag right for bigger, easier-to-see points; left for smaller points and finer detail.">Size <input id="size" type="range" min="1" max="6" step="0.5" value="2"></label>
   <label title="Adds shading so 3D shapes are easier to see; untick for flat colours."><input id="edl" type="checkbox" checked> Shading</label>
-  <input id="find" type="text" placeholder="Find object ID ↵" title="Type an object ID and press Enter to jump to that object.">
+  <input id="find" type="text" placeholder="Find object ID ↵" title="Type an object ID, or a known target ID such as T004, and press Enter to jump to it.">
   <button id="top" title="Look straight down from above.">Top</button>
   <button id="reset" title="Return to the default view showing the whole point cloud.">Reset view</button>
 </header>
@@ -74,7 +75,12 @@ const $ = id => document.getElementById(id);
 $("title").textContent = D.name;
 $("title").title = D.name;
 $("summary").textContent = `${N.toLocaleString("en")} of ${D.total.toLocaleString("en")} points · ${D.objects.length.toLocaleString("en")} objects`;
+const L = D.las ? new Uint8Array(decode(D.las)) : null;  // Input LAS classification code per point.
+const T = D.truth ? new Uint8Array(decode(D.truth)) : null;  // 0 none, 1 detected target, 2 false alarm, 3 missed.
+const truthObjects = D.truth_objects || [];  // [id, class, status, x, y, z]
 if (!V) $("colour").querySelector("[value=intensity]").disabled = true;
+if (!L) $("colour").querySelector("[value=las]").disabled = true;
+if (!T) $("colour").querySelector("[value=truth]").disabled = true;
 
 // ---- WebGL2: points into an offscreen buffer, then eye-dome lighting (EDL) onto the screen.
 const canvas = $("gl");
@@ -181,6 +187,13 @@ const VIRIDIS = [[68, 1, 84], [65, 68, 135], [42, 120, 142], [34, 168, 132], [12
 const TERRAIN = [[46, 62, 86], [70, 96, 120], [110, 132, 140], [160, 166, 150], [205, 200, 180]];  // Muted, for background.
 const GREY = [[40, 40, 40], [250, 250, 250]];
 const CLASS = [[52, 211, 153], [250, 204, 21], [244, 114, 182], [96, 165, 250], [251, 146, 60], [167, 139, 250], [74, 222, 128], [248, 113, 113]];
+// ASPRS-style colours for the input file's LAS classes; codes not listed get a grey.
+const LAS_COLOUR = {0: [150, 150, 150], 1: [170, 170, 170], 2: [166, 120, 70], 3: [120, 200, 90], 4: [70, 170, 60],
+  5: [30, 120, 40], 6: [230, 90, 70], 7: [255, 0, 255], 9: [60, 120, 230], 17: [240, 200, 80], 18: [255, 0, 255],
+  40: [230, 190, 110], 41: [70, 160, 255], 42: [120, 200, 255], 43: [255, 120, 40], 44: [255, 160, 90], 45: [40, 90, 200],
+  64: [255, 230, 0], 65: [255, 60, 60]};
+const TRUTH = [null, [46, 204, 113], [231, 76, 60], [255, 0, 255]];
+const TRUTH_NAMES = ["", "Detected target", "False alarm", "Missed target"];
 const OBJECT = [[78, 121, 167], [242, 142, 43], [225, 87, 89], [118, 183, 178], [89, 161, 79], [237, 201, 72], [176, 122, 161], [255, 157, 167], [156, 117, 95], [186, 176, 172]];
 let selected = 0, hidden = 0;
 // Objects filtered out in the desktop app are drawn and picked as if they were not objects.
@@ -197,6 +210,8 @@ function colours() {
     else if (mode === "height") c = ramp(VIRIDIS, h);
     else if (mode === "intensity") c = ramp(GREY, V[i] / 255);
     else if (mode === "objects") c = isShown(I[i]) ? OBJECT[I[i] % OBJECT.length] : ramp(TERRAIN, h);
+    else if (mode === "las") c = LAS_COLOUR[L[i]] || [120, 120, 120];
+    else if (mode === "truth") c = T[i] && (T[i] === 3 || isShown(I[i])) ? TRUTH[T[i]] : ramp(TERRAIN, h).map(v => v * 0.7);
     else c = K[i] > 0 && (I[i] === 0 || shown[I[i]]) ? CLASS[(K[i] - 1) % CLASS.length] : ramp(TERRAIN, h);
     C[3 * i] = c[0]; C[3 * i + 1] = c[1]; C[3 * i + 2] = c[2];
   }
@@ -209,6 +224,23 @@ const classCounts = new Array(classNames.length).fill(0);
 for (let i = 0; i < N; i++) classCounts[K[i]]++;
 function legend(mode) {
   const box = $("legend");
+  if (mode === "las") {
+    const counts = new Map();
+    for (let i = 0; i < N; i++) counts.set(L[i], (counts.get(L[i]) || 0) + 1);
+    box.innerHTML = `<div class="title">Class stored in the input file (LAS code)</div>` + D.las_names.map(([code, name]) =>
+      `<div class="row"><span class="swatch" style="background:${css(LAS_COLOUR[code] || [120, 120, 120])}"></span>${code} ${name}` +
+      `<span class="count">${(counts.get(code) || 0).toLocaleString("en")}</span></div>`).join("");
+    return;
+  }
+  if (mode === "truth") {
+    const counts = [0, 0, 0, 0];
+    for (let i = 0; i < N; i++) counts[T[i]]++;
+    const found = truthObjects.filter(t => t[2] === "detected").length;
+    box.innerHTML = `<div class="title">Compared with known targets · ${found} of ${truthObjects.length} found</div>` +
+      [1, 2, 3].map(k => `<div class="row"><span class="swatch" style="background:${css(TRUTH[k])}"></span>${TRUTH_NAMES[k]} points` +
+        `<span class="count">${counts[k].toLocaleString("en")}</span></div>`).join("");
+    return;
+  }
   if (mode === "height") {
     box.innerHTML = `<div class="title">Height (m)</div><div class="ramp" style="background:linear-gradient(90deg,${VIRIDIS.map(css)})"></div>
       <div class="ramp-labels"><span>${(zLo + originZ).toFixed(1)}</span><span>${(zHi + originZ).toFixed(1)}</span></div>`;
@@ -349,7 +381,8 @@ function pick(e) {
   }
   if (best < 0) { $("pick").textContent = "No point here."; selected = 0; colours(); console.log("PICK "); return; }
   const o = isShown(I[best]) ? objects.get(I[best]) : undefined, z = (P[3 * best + 2] + originZ).toFixed(2);
-  $("pick").textContent = o ? `${describe(o)} · Z ${z} m` : `${classNames[K[best]][1]} point · Z ${z} m`;
+  const las = L ? ` · LAS class ${L[best]}` : "", truth = T && T[best] ? ` · ${TRUTH_NAMES[T[best]]}` : "";
+  $("pick").textContent = (o ? `${describe(o)} · Z ${z} m` : `${classNames[K[best]][1]} point · Z ${z} m`) + las + truth;
   selected = o ? o[0] : 0;
   colours();
   console.log("PICK " + (o ? o[1] : ""));  // Read by the desktop app to select the object in its table.
@@ -358,6 +391,15 @@ function pick(e) {
 function focusObject(id) {
   const q = String(id).trim().toUpperCase();
   const o = q && D.objects.find(o => o[1].toUpperCase() === q || o[1].toUpperCase().endsWith("_" + q));
+  const t = !o && q && truthObjects.find(t => t[0].toUpperCase() === q);
+  if (t) {  // A known target: fly to it, whether or not it was detected.
+    $("pick").textContent = `Known target ${t[0]} · ${t[1]} · ${t[2]}`;
+    target = [t[3], t[4], t[5]]; dist = Math.min(dist, Math.max(15, radius / 12));
+    selected = 0;
+    if (T) $("colour").value = "truth";
+    colours();
+    return true;
+  }
   if (!o) { $("pick").textContent = "Object not found."; return false; }
   $("pick").textContent = describe(o);
   $("find").value = o[1];
