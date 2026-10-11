@@ -561,7 +561,27 @@ def write_web_view(dest, name, xyz, instance, objects, origin, total, predicted=
     Path(dest).write_text(page, encoding="utf-8")
 
 
-def process_batch(paths, model_path, output_root, cfg, log=print):
+def refresh_web_view(page):
+    """Move a saved 3D page onto the current viewer template, keeping its embedded data."""
+    page = Path(page)
+    text = page.read_text(encoding="utf-8")
+    marker = '<script id="data" type="application/json">'
+    start = text.find(marker) + len(marker)
+    end = text.find("</script>", start)
+    if start < len(marker) or end < 0:
+        return
+    head, tail = WEB_TEMPLATE.read_text(encoding="utf-8").split("/*DATA*/", 1)
+    if text[:start] == head and text[end:] == tail:
+        return
+    page.write_text(head + text[start:end] + tail, encoding="utf-8")
+
+
+# Rough share of a file's processing time per stage, for the progress bar.
+STAGES = {"reading": 0.0, "features": 0.15, "classifying": 0.65, "grouping": 0.85, "writing": 0.95}
+
+
+def process_batch(paths, model_path, output_root, cfg, log=print, progress=None):
+    """progress(file_number, file_count, name, stage, fraction_of_batch) is called as work advances."""
     validate_settings(cfg)
     if not paths:
         raise ValueError("Select at least one LAS / LAZ")
@@ -591,20 +611,29 @@ def process_batch(paths, model_path, output_root, cfg, log=print):
                  "result_path": str(folder.relative_to(run)), "status": "processing"}
         summary["datasets"].append(entry)
         log(f"{dataset_id}: {Path(path).name}")
+
+        def stage(name):
+            if progress:
+                progress(number, len(paths), Path(path).name, name, (number - 1 + STAGES[name]) / len(paths))
         exported = []
         try:
+            stage("reading")
             cloud = read_cloud(path, cfg)
             entry["input"] = cloud["info"]
             entry["source_sha256"] = sha256(path)
             log(f"{dataset_id}: {len(cloud['xyz']):,} points")
+            stage("features")
             features = extract_features(cloud, cfg.neighbors, log)
+            stage("classifying")
             log(f"{dataset_id}: classifying points")
             proba = predict(model["estimator"], features)
             winning = proba.argmax(axis=1)
             classes = np.asarray(model["estimator"].classes_)[winning]
             confidence = proba[np.arange(len(features)), winning]
+            stage("grouping")
             log(f"{dataset_id}: grouping points into objects")
             groups = instance_groups(cloud["xyz"], classes, confidence, cfg)
+            stage("writing")
             log(f"{dataset_id}: writing {len(groups)} objects")
             point_instance = np.zeros(len(features), dtype=np.int32)
             objects, rows = [], []
@@ -649,6 +678,8 @@ def process_batch(paths, model_path, output_root, cfg, log=print):
             log(f"{dataset_id}: FAILED: {exc}")
         write_json(folder / "status.json", entry)
         write_json(run / "run_metadata.json", summary)
+    if progress:
+        progress(len(paths), len(paths), "", "done", 1.0)
     summary["finished_at"] = datetime.now().astimezone().isoformat()
     write_json(run / "run_metadata.json", summary)
     return str(run)

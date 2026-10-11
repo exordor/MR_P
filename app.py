@@ -1,6 +1,7 @@
 """PySide6 desktop UI with an embedded WebGL 3D view; long-running operations stay off the UI thread."""
 from __future__ import annotations
 
+import html
 import json
 import sys
 import threading
@@ -14,11 +15,11 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QSplitter, QTableView, QTableWidget, QTableWidgetItem, QTabWidget,
+                               QPushButton, QSpinBox, QDoubleSpinBox, QSplitter, QTableView, QTableWidget, QTableWidgetItem, QTabWidget,
                                QVBoxLayout, QWidget)
 
-from core import (Settings, evaluate_model, inspect_file, label_template, process_batch, train_model,
-                  write_web_view)
+from core import (Settings, evaluate_model, inspect_file, label_template, process_batch, refresh_web_view,
+                  train_model, write_web_view)
 
 
 def size_text(count):
@@ -118,6 +119,26 @@ class ObjectTable(QAbstractTableModel):
         return None
 
 
+class ObjectFilter(QSortFilterProxyModel):
+    """Sorts by the numeric value and hides objects outside the class / size / confidence filter."""
+
+    def __init__(self):
+        super().__init__()
+        self.class_name, self.min_points, self.min_confidence = "", 0, 0.0
+
+    def set_filter(self, class_name, min_points, min_confidence):
+        self.class_name, self.min_points, self.min_confidence = class_name, min_points, min_confidence
+        self.invalidateFilter()
+
+    def active(self):
+        return bool(self.class_name or self.min_points or self.min_confidence)
+
+    def filterAcceptsRow(self, row, parent):
+        _, class_name, points, confidence, *_ = self.sourceModel().rows[row]
+        return ((not self.class_name or class_name == self.class_name) and points >= self.min_points
+                and confidence >= self.min_confidence)
+
+
 class ViewerPage(QWebEnginePage):
     """Forwards 'PICK <object id>' console messages from the 3D page to the window."""
 
@@ -163,9 +184,14 @@ class App(QMainWindow):
         tabs.addTab(self.build_processing(), "Process and View")
         tabs.addTab(self.build_training(), "Train and Evaluate")
         layout.addWidget(self.build_settings())
+        progress_row = QHBoxLayout()
+        self.status = QLabel("")
+        progress_row.addWidget(self.status)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
-        layout.addWidget(self.progress)
+        self.progress.setTextVisible(False)
+        progress_row.addWidget(self.progress, 1)
+        layout.addLayout(progress_row)
         self.log_box = QPlainTextEdit(readOnly=True)
         self.log_box.setFixedHeight(90)
         layout.addWidget(self.log_box)
@@ -239,8 +265,35 @@ class App(QMainWindow):
         run_row.addWidget(self.reuse_button)
         layout.addLayout(run_row)
         splitter = QSplitter(Qt.Horizontal)
+        table_side = QWidget()
+        table_layout = QVBoxLayout(table_side)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        filters = QHBoxLayout()
+        self.class_filter = QComboBox()
+        self.class_filter.addItem("All classes")
+        self.min_points_filter = QSpinBox()
+        self.min_points_filter.setRange(0, 1_000_000_000)
+        self.min_points_filter.setSingleStep(10)
+        self.min_points_filter.setPrefix("≥ ")
+        self.min_points_filter.setSuffix(" pts")
+        self.min_confidence_filter = QDoubleSpinBox()
+        self.min_confidence_filter.setRange(0, 1)
+        self.min_confidence_filter.setSingleStep(0.05)
+        self.min_confidence_filter.setDecimals(2)
+        self.min_confidence_filter.setPrefix("conf ≥ ")
+        self.class_filter.setToolTip("Show only objects of this class.")
+        self.min_points_filter.setToolTip("Show only objects with at least this many points.")
+        self.min_confidence_filter.setToolTip("Show only objects with at least this mean confidence.")
+        for widget in (self.class_filter, self.min_points_filter, self.min_confidence_filter):
+            filters.addWidget(widget)
+        self.class_filter.currentIndexChanged.connect(lambda _: self.apply_filter())
+        self.min_points_filter.valueChanged.connect(lambda _: self.apply_filter())
+        self.min_confidence_filter.valueChanged.connect(lambda _: self.apply_filter())
+        filters.addWidget(self.button("Clear", self.clear_filter))
+        filters.addStretch()
+        table_layout.addLayout(filters)
         self.objects = ObjectTable()
-        self.sorted_objects = QSortFilterProxyModel()
+        self.sorted_objects = ObjectFilter()
         self.sorted_objects.setSourceModel(self.objects)
         self.sorted_objects.setSortRole(Qt.UserRole)
         self.table = QTableView()
@@ -253,7 +306,8 @@ class App(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.setToolTip("Click an object to show it in the 3D view. Click a heading to sort.")
         self.table.selectionModel().currentRowChanged.connect(self.table_selected)
-        splitter.addWidget(self.table)
+        table_layout.addWidget(self.table)
+        splitter.addWidget(table_side)
         self.web = QWebEngineView()
         # Keep a Python reference: Qt calls the overridden method, so the wrapper must outlive the view.
         self.viewer_page = ViewerPage(self.picked_in_view, self.web)
@@ -369,7 +423,8 @@ class App(QMainWindow):
             QMessageBox.information(self, "Processing", "A task is already running.")
             return
         self.busy = True
-        self.progress.setRange(0, 0)  # Busy indicator.
+        self.progress.setRange(0, 0)  # Busy indicator until the task reports progress.
+        self.status.setText("Working…")
         def work():
             try:
                 self.bridge.event.emit("done", (fn(), callback))
@@ -381,8 +436,15 @@ class App(QMainWindow):
         if kind == "log":
             self.log_box.appendPlainText(value)
             return
+        if kind == "progress":
+            number, count, name, stage, fraction = value
+            self.progress.setRange(0, 1000)
+            self.progress.setValue(round(fraction * 1000))
+            self.status.setText(f"File {number} / {count} · {stage} · {name}" if stage != "done" else "Finishing…")
+            return
         self.busy = False
         self.progress.setRange(0, 1)
+        self.status.setText("")
         if kind == "error":
             self.log_box.appendPlainText(value)
             QMessageBox.critical(self, "Task failed", value)
@@ -443,8 +505,12 @@ class App(QMainWindow):
             model, output = self.model_path.text(), self.output_path.text()
             if not model or not paths or not output:
                 raise ValueError("Select input files, a model and a results directory")
-            self.job(lambda: process_batch(paths, model, output, cfg, self.log), self.load_run)
+            self.job(lambda: process_batch(paths, model, output, cfg, self.log, self.report_progress), self.load_run)
         self.safe_action(action)
+
+    def report_progress(self, *value):
+        """Thread-safe: called from the worker thread."""
+        self.bridge.event.emit("progress", value)
 
     def train(self):
         def action():
@@ -509,13 +575,19 @@ class App(QMainWindow):
         self.run_path = Path(path)
         metadata = json.loads((self.run_path / "run_metadata.json").read_text(encoding="utf-8"))
         self.show_run_info(metadata)
-        self.datasets = {e["dataset_id"]: e for e in metadata["datasets"] if e["status"].startswith("success")}
-        failed = sum(e["status"] == "failed" for e in metadata["datasets"])
-        self.log(f"Loaded {len(self.datasets)} datasets, {failed} failed")
+        self.datasets = {e["dataset_id"]: e for e in metadata["datasets"]}
+        failed = [e for e in metadata["datasets"] if e["status"] == "failed"]
+        self.log(f"Loaded {len(self.datasets) - len(failed)} datasets, {len(failed)} failed")
+        for e in failed:
+            self.log(f"  {e['dataset_id']} {Path(e['source']).name} FAILED: {e.get('error', 'unknown error')}")
         self.loaded_page = None
         self.dataset.blockSignals(True)
         self.dataset.clear()
-        self.dataset.addItems([f"{key} | {Path(e['source']).name}" for key, e in self.datasets.items()])
+        for key, e in self.datasets.items():
+            failed_text = "  ✖ failed" if e["status"] == "failed" else ""
+            self.dataset.addItem(f"{key} | {Path(e['source']).name}{failed_text}")
+            if failed_text:
+                self.dataset.setItemData(self.dataset.count() - 1, e.get("error", ""), Qt.ToolTipRole)
         self.dataset.blockSignals(False)
         if self.datasets:
             self.view()
@@ -565,11 +637,15 @@ class App(QMainWindow):
         if not self.run_path or not self.dataset.currentText():
             raise ValueError("Process a dataset or open saved results first")
         key = self.dataset.currentText().split(" | ", 1)[0]
+        if self.datasets[key]["status"] == "failed":
+            raise ValueError(f"{key} failed: {self.datasets[key].get('error', 'unknown error')}")
         return key, self.run_path / self.datasets[key]["result_path"]
 
     def view_page(self, key, folder):
         page = folder / "view3d.html"
-        if not page.exists():  # Results saved before the 3D page existed: build it from the display cache.
+        if page.exists():
+            refresh_web_view(page)  # Older results get the current viewer.
+        else:  # Results saved before the 3D page existed: build it from the display cache.
             objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
             with np.load(folder / "view.npz", allow_pickle=False) as data:
                 write_web_view(page, Path(self.datasets[key]["source"]).name, data["xyz"], data["instance"],
@@ -578,11 +654,24 @@ class App(QMainWindow):
 
     def view(self):
         def action():
-            key, folder = self.selected_folder()
+            if not self.run_path or not self.dataset.currentText():
+                return
+            key = self.dataset.currentText().split(" | ", 1)[0]
+            entry = self.datasets[key]
+            if entry["status"] == "failed":
+                self.objects.load([])
+                self.reset_class_filter()
+                self.loaded_page = None
+                self.web.setHtml("")
+                error = entry.get("error", "unknown error")
+                short = error if len(error) <= 90 else error[:87] + "…"
+                self.view_note.setText(f"<span style='color:#c0392b'>Failed: {html.escape(short)}</span>")
+                self.view_note.setToolTip(error)
+                return
+            folder = self.run_path / entry["result_path"]
+            self.view_note.setToolTip("")
             self.objects.load(json.loads((folder / "objects.json").read_text(encoding="utf-8")))
-            total = self.datasets[key].get("input", {}).get("point_count")
-            points = f"{total:,} points · " if total else ""
-            self.view_note.setText(f"{points}{self.objects.rowCount():,} objects")
+            self.reset_class_filter()  # Also writes the point / object count note.
             page = self.view_page(key, folder)
             if page != self.loaded_page:
                 self.loaded_page = page
@@ -592,6 +681,8 @@ class App(QMainWindow):
         self.safe_action(action)
 
     def page_loaded(self, ok):
+        if ok and self.sorted_objects.active():
+            self.apply_filter()
         if ok and self.pending_focus:
             self.focus_in_view(self.pending_focus)
 
@@ -615,6 +706,46 @@ class App(QMainWindow):
                 self.table.scrollTo(index)
                 break
         self.table.selectionModel().blockSignals(False)
+
+    def reset_class_filter(self):
+        """Offer the classes of the loaded objects; keep the chosen class if it is still there."""
+        current = self.class_filter.currentText()
+        names = sorted({row[1] for row in self.objects.rows})
+        self.class_filter.blockSignals(True)
+        self.class_filter.clear()
+        self.class_filter.addItems(["All classes", *names])
+        self.class_filter.setCurrentText(current if current in names else "All classes")
+        self.class_filter.blockSignals(False)
+        self.apply_filter()
+
+    def clear_filter(self):
+        for widget in (self.class_filter, self.min_points_filter, self.min_confidence_filter):
+            widget.blockSignals(True)
+        self.class_filter.setCurrentIndex(0)
+        self.min_points_filter.setValue(0)
+        self.min_confidence_filter.setValue(0)
+        for widget in (self.class_filter, self.min_points_filter, self.min_confidence_filter):
+            widget.blockSignals(False)
+        self.apply_filter()
+
+    def apply_filter(self):
+        class_name = "" if self.class_filter.currentIndex() <= 0 else self.class_filter.currentText()
+        self.sorted_objects.set_filter(class_name, self.min_points_filter.value(), self.min_confidence_filter.value())
+        total, shown = self.objects.rowCount(), self.sorted_objects.rowCount()
+        if self.sorted_objects.active():
+            ids = [self.objects.rows[self.sorted_objects.mapToSource(self.sorted_objects.index(r, 0)).row()][0]
+                   for r in range(shown)]
+            script = f"window.setVisibleObjects && setVisibleObjects({json.dumps(ids)})"
+        else:
+            script = "window.setVisibleObjects && setVisibleObjects(null)"
+        self.web.page().runJavaScript(script)
+        if self.run_path and self.dataset.currentText():
+            key = self.dataset.currentText().split(" | ", 1)[0]
+            if self.datasets.get(key, {}).get("status") != "failed":
+                points = self.datasets[key].get("input", {}).get("point_count")
+                prefix = f"{points:,} points · " if points else ""
+                shown_text = f"{shown:,} of {total:,}" if self.sorted_objects.active() else f"{total:,}"
+                self.view_note.setText(f"{prefix}{shown_text} objects")
 
     def open_browser_view(self):
         def action():

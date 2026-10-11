@@ -13,6 +13,7 @@ import core
 from core import (HEADERS, Settings, dbscan, display_indices, evaluate_model, extract_features, inspect_file,
                   instance_groups, load_manifest, load_model, make_run_directory, process_batch,
                   projected_area, read_cloud, train_model)
+from core import refresh_web_view
 from create_demo import create_demo
 from sklearn.cluster import DBSCAN
 
@@ -114,6 +115,26 @@ class WorkflowTest(unittest.TestCase):
         metadata = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))
         self.assertEqual(metadata["model_path"], str(self.model.resolve()))
         self.assertEqual(metadata["settings"]["threshold"], self.cfg.threshold)
+
+    def test_progress_reports_each_file_and_finishes(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        calls = []
+        process_batch([sample, self.root / "missing.laz"], self.model, self.root / "progress", self.cfg,
+                      log=lambda x: None, progress=lambda *a: calls.append(a))
+        fractions = [c[4] for c in calls]
+        self.assertEqual(fractions, sorted(fractions))
+        self.assertEqual(calls[-1][3:], ("done", 1.0))
+        self.assertEqual({c[0] for c in calls if c[3] == "reading"}, {1, 2})
+
+    def test_saved_page_moves_to_current_viewer(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        run = Path(process_batch([sample], self.model, self.root / "refresh", self.cfg, log=lambda x: None))
+        page = run / "datasets" / "D0001" / "view3d.html"
+        before = web_data(page.parent)
+        page.write_text(page.read_text(encoding="utf-8").replace("setVisibleObjects", "oldViewer"), encoding="utf-8")
+        refresh_web_view(page)
+        self.assertIn("setVisibleObjects", page.read_text(encoding="utf-8"))
+        self.assertEqual(web_data(page.parent), before)
 
     def test_area_definition(self):
         square = np.array([[500000, 6000000, -2], [500002, 6000000, -2],
