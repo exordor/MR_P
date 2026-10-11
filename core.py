@@ -494,14 +494,26 @@ def web_indices(instance, limit=WEB_LIMIT):
     return np.sort(np.concatenate((chosen, rng.choice(background, take_background, replace=False))))
 
 
-def write_web_view(dest, name, xyz, instance, objects, origin, total):
-    """Self-contained offline HTML page drawing the points with WebGL (GPU)."""
+def write_web_view(dest, name, xyz, instance, objects, origin, total, predicted=None, class_names=None,
+                   intensity=None):
+    """Self-contained offline HTML page drawing the points with WebGL (GPU).
+
+    predicted: class ID per point, class_names: {class ID: name}; intensity: raw LAS intensity per point.
+    """
     def encode(array):
         return base64.b64encode(np.ascontiguousarray(array).tobytes()).decode("ascii")
-    data = {"name": name, "total": int(total),
+    data = {"name": name, "total": int(total), "origin_z": float(origin[2]),
             "xyz": encode((xyz - origin).astype("<f4")), "instance": encode(instance.astype("<i4")),
             "objects": [[o["instance_index"], o["object_id"], o["class_name"], o["point_count"], o["confidence"],
                          *(np.asarray(o["centroid"]) - origin).tolist()] for o in objects]}
+    if predicted is not None and class_names:
+        ids = sorted(int(k) for k in class_names)
+        data["classes"] = [[i, class_names[str(i)]] for i in ids]
+        data["cls"] = encode(np.searchsorted(ids, predicted).astype(np.uint8))
+    if intensity is not None and len(intensity):
+        low, high = np.percentile(intensity, [2, 98])
+        scaled = np.clip((intensity - low) / max(high - low, 1e-9) * 255, 0, 255)
+        data["intensity"] = encode(scaled.astype(np.uint8))
     # "</" is escaped so no value can close the <script> element that holds the data.
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     page = WEB_TEMPLATE.read_text(encoding="utf-8").replace("/*DATA*/", payload, 1)
@@ -578,7 +590,8 @@ def process_batch(paths, model_path, output_root, cfg, log=print):
                 writer.writerows(rows)
             web = web_indices(point_instance)
             write_web_view(folder / "view3d.html", Path(path).name, cloud["xyz"][web], point_instance[web],
-                           objects, cloud["xyz"].mean(axis=0), len(features))
+                           objects, cloud["xyz"].mean(axis=0), len(features), classes[web], model["classes"],
+                           cloud["intensity"][web])
             entry["display"] = {"source_points": len(features), "shown_points": len(web), "limit": WEB_LIMIT,
                                 "page": "view3d.html", "method": "object points first, then random background"}
             write_json(folder / "objects.json", objects)

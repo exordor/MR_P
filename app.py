@@ -179,7 +179,7 @@ class App(QMainWindow):
         splitter.addWidget(self.web)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 5)
-        splitter.setSizes([430, 900])
+        splitter.setSizes([380, 1000])
         layout.addWidget(splitter, 1)
         return page
 

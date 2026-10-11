@@ -134,6 +134,11 @@ class WorkflowTest(unittest.TestCase):
         objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
         self.assertEqual({o[1] for o in data["objects"]}, {o["object_id"] for o in objects})
         self.assertEqual(set(instance) - {0}, {o["instance_index"] for o in objects})
+        self.assertEqual(data["classes"], [[0, "background"], [1, "synthetic_object"]])
+        cls = np.frombuffer(base64.b64decode(data["cls"]), dtype=np.uint8)
+        self.assertEqual(len(cls), count)
+        self.assertTrue(set(cls[instance > 0]) - {0})  # Object points carry a target class.
+        self.assertEqual(len(base64.b64decode(data["intensity"])), count)
 
     def test_chunked_dbscan_matches_sklearn_core_clusters(self):
         rng = np.random.default_rng(0)
