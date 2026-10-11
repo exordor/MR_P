@@ -37,13 +37,51 @@ On Linux, use `.venv/bin/python` instead. Start the application and click **Synt
 
 The demonstration contains no real YellowScan measurements. Its trained model and metrics provide no evidence of real-world underwater recognition performance.
 
+## Metal targets demonstration (real scenes, simulated targets)
+
+The intended targets are square metal plates and metal spheres under about 1 m, lying on or partly buried in a riverbed. No real target data exist yet, so `synthetic_targets.py` places simulated targets on the riverbed (LAS class 40) of real YellowScan Navigator scenes and records where they are:
+
+```sh
+.venv/bin/python synthetic_targets.py metal_demo --train-and-run
+```
+
+It needs the public sample files (path set in `DATA` in the script) and takes a few minutes. Three crops are written: Saint-Bauzille A (train, 70 targets), Saint-Bauzille B (validation, 30) and Devil's Bridge (test, 40), each as `<scene>.laz`, `<scene>.labels.csv` and `<scene>.truth.json`. Each target is sampled on the side the scanner sees, with the local riverbed point density, 2–3 cm range noise, a brighter but noisy intensity, return attributes copied from nearby bottom points, imperfect vendor classes (mostly 40, some 45 and 1), the riverbed underneath removed, and a few water-column returns above it. Click **Metal targets demo** to open the result.
+
+On Devil's Bridge, the saved demonstration finds 24 of 40 targets with 3 false alarms, using threshold 0.6, cluster radius 0.3 m and at least 8 points per object. Detection depends mainly on how many laser points land on a target: 22 of 24 targets with at least 20 points were found, but only 2 of 16 with fewer. These numbers show that the workflow runs. Simulated targets are not evidence of real-world performance.
+
+## LAS classes
+
+Input classes follow ASPRS LAS 1.4, including the topo-bathymetric codes YellowScan uses: 1 unassigned, 2 ground, 7 low noise, 40 bathymetric bottom, 41 water surface, 45 water column, and others. The model uses them as inputs (bottom, water surface, water column, ground, noise), together with each point's height above the local riverbed, estimated from class 40 points.
+
+Every class number in the program is an ASPRS code; there is no separate numbering. A manifest lists only its target classes, for example `{"64": "metal_plate", "65": "metal_sphere"}`. A target class must be a defined ASPRS class other than 0 and 1 (for example 43 submerged object) or a user-definable code 64–255. Reserved codes (such as 8, 12, 23–39 and 46–63) are rejected. There is no background class: points that are not targets keep their own LAS class. The model uses 0 internally for "not a target", but never writes it to a file.
+
+The metal demonstration uses **64 = metal plate** and **65 = metal sphere**. The standard code 43 means a submerged object without further detail, so it cannot separate plates from spheres.
+
+Each processed file gets `classified.laz`, a copy of the input with every attribute kept. Points in a detected object get that object's target class; all other points keep their input class. An extra dimension `object_instance` holds the object number (0 = none).
+
+### LAS 1.2 and LAS 1.4
+
+Both versions are read and processed; YellowScan delivers both (the Barsebäck harbour sample is LAS 1.2, point format 3; the river samples are LAS 1.4, point format 7). The differences that matter:
+
+- LAS 1.2 (and 1.3) point formats 0–5 store only classes 0–31 and define no user-definable range or topo-bathy codes. The Barsebäck file marks all water as 9; the river files split water into 40, 41 and 45. Without class 40, the height-above-riverbed feature is unavailable and the model relies on the other features.
+- The **Classified LAS** setting chooses the version of `classified.laz`. With **same as input** (default), LAS 1.4 stays 1.4 and LAS 1.2 stays 1.2 with the same point format. A target code above 31 (such as 64) cannot fit the 1.2 class field, so it is written to the User Data field of target points; their class field keeps the input class. With **1.4**, every file is written as LAS 1.4 in the matching point format (0, 1 → 6; 2, 3 → 7; 4 → 9; 5 → 10), with the CRS stored as WKT, and target codes go in the class field. `run_metadata.json` records which was used.
+- A LAS/LAZ label file in a 1.2/1.3 point format may mark targets above 31 in User Data, the same way the classified output does.
+
+Training labels are LAS codes too. In a `point_index,class_id` CSV, a target class marks a target point. Any other code (0, 2, 40, …) marks a point that is not a target, and a blank value or -1 means unlabelled. Labels can also be a LAS/LAZ file: mark target points with their target class (for example in CloudCompare) and set the manifest's `labels` to that file.
+
+## Ground-truth evaluation
+
+When an input `scene.laz` has `scene.truth.json` next to it, processing compares the detected objects with the known targets and saves `evaluation.json`. A detection and a target are matched one-to-one, highest point overlap first, when they share at least a quarter of their combined points (point IoU ≥ 0.25). The window then shows how many targets were found, false alarms, wrong classes, mean IoU, centre error and the missed target IDs; the table gets a **Ground truth** column. In the 3D view, colour by **Truth** to see detected, false-alarm and missed points, or type a target ID such as `T004` in the find box. Colour by **LAS class** to see the input classes.
+
+A truth file lists `point_count` and `objects`; each object has `object_id`, `class_id`, `class_name`, `center` and either `point_range` (`[start, stop)`) or `point_indices`.
+
 ## Real data workflow
 
 1. Export appropriately georeferenced and corrected LAS/LAZ data from CloudStation. The prototype does not process YellowScan RAW, reconstruct trajectories or perform underwater refraction correction.
 2. Confirm that X, Y and Z are in metres. Supply the known projected CRS if it is absent from the LAS header. This setting records the CRS and does not reproject coordinates. Geographic or non-metric horizontal coordinates are rejected.
-3. Prepare labels in `point_index,class_id` CSV files. Indices refer to the original zero-based point-record order. Class 0 is background, positive integers are target classes, and blank or -1 means unlabelled. External annotation tools must preserve or recover this mapping.
-4. Create a dataset manifest using `manifest_example.json`. Separate independent scenes or non-overlapping regions into train, validation and test sets. Use the same `scene_id` for overlapping data; the software checks duplicate paths, identical file content and cross-split scene IDs, but cannot prove that different files do not overlap spatially.
-5. Select the manifest in **Train and Evaluate**, choose a backend and training iterations, and save a new model. Every declared class must appear in the training labels. Validation metrics and model settings are saved alongside the model. Test labels are used only when **Evaluate held-out test set** is clicked.
+3. Prepare labels in `point_index,class_id` CSV files, or as a LAS/LAZ file (see [LAS classes](#las-classes)). Indices refer to the original zero-based point-record order. Class IDs are ASPRS LAS codes (see [LAS classes](#las-classes)): a manifest target class marks a target, any other code marks a non-target point, and blank or -1 means unlabelled. External annotation tools must preserve or recover this mapping.
+4. Create a dataset manifest using `manifest_example.json`. Separate independent scenes or non-overlapping regions into train, validation and test sets. Use the same `scene_id` for overlapping data; the software checks duplicate paths, identical file content and cross-split scene IDs, but cannot prove that different files do not overlap spatially. Random-forest classes are weighted by inverse frequency unless the manifest sets `"balance_classes": false`.
+5. Select the manifest in **Train and Evaluate**, choose a backend and training iterations, and save a new model. Every target class, and some non-target points, must appear in the training labels. Validation metrics and model settings are saved alongside the model. Test labels are used only when **Evaluate held-out test set** is clicked.
 6. In **Process and View**, select a trusted trained model, one or more input files, and a results directory. Files run sequentially; a failed file does not stop the remaining batch.
 7. The object table (left) lists every detected object; click a heading to sort. The 3D view (right) is part of the window. Click an object in the table to fly to it in 3D, or click a point in 3D to select its object in the table. **Open in browser** shows the same view in a web browser. Saved results can be reopened without rerunning inference or reading the original input file.
 
@@ -61,6 +99,8 @@ run_directory/
       report.csv
       objects.json
       view3d.html
+      classified.laz
+      evaluation.json   (only with ground truth)
       status.json
 ```
 

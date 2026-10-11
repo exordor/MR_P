@@ -8,8 +8,10 @@ import threading
 import webbrowser
 from pathlib import Path
 
+import laspy
 import numpy as np
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt, QUrl, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -31,7 +33,7 @@ def size_text(count):
 
 class InspectDialog(QDialog):
     """Header summary of every input file; read-only, so it needs no settings."""
-    HEADERS = ["File", "Points", "File size", "Width X m", "Width Y m", "Z min", "Z max", "CRS", "Memory needed",
+    HEADERS = ["File", "LAS version", "Points", "File size", "Width X m", "Width Y m", "Z min", "Z max", "CRS", "Memory needed",
                "Check"]
 
     def __init__(self, summaries, parent=None):
@@ -44,18 +46,19 @@ class InspectDialog(QDialog):
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         for row, info in enumerate(summaries):
             if "error" in info:
-                cells = [info["name"]] + [""] * 8 + [info["error"]]
+                cells = [info["name"]] + [""] * 9 + [info["error"]]
             else:
                 (x0, y0, z0), (x1, y1, z1) = info["mins"], info["maxs"]
                 memory = size_text(info["memory_bytes"])
                 if info["ram_bytes"]:
                     memory += f" of {size_text(info['ram_bytes'])}"
-                cells = [info["name"], f"{info['point_count']:,}", size_text(info["file_bytes"]),
+                cells = [info["name"], f"{info['las_version']} (format {info['point_format']})",
+                         f"{info['point_count']:,}", size_text(info["file_bytes"]),
                          f"{x1 - x0:,.2f}", f"{y1 - y0:,.2f}", f"{z0:,.2f}", f"{z1:,.2f}",
                          info["crs"] or "none", memory, "; ".join(info["issues"]) or "OK"]
             for column, text in enumerate(cells):
                 item = QTableWidgetItem(text)
-                if 1 <= column <= 6:
+                if 2 <= column <= 7:
                     item.setTextAlignment(int(Qt.AlignRight | Qt.AlignVCenter))
                 if "error" not in info:
                     item.setToolTip(f"{info['source']}\nLAS {info['las_version']}, point format "
@@ -82,16 +85,27 @@ class InspectDialog(QDialog):
 
 class ObjectTable(QAbstractTableModel):
     """Detected objects; numbers stay numeric so column sorting is numeric."""
-    HEADERS = ["Object ID", "Class", "Points", "Confidence", "X", "Y", "Z"]
+    HEADERS = ["Object ID", "Class", "Points", "Confidence", "X", "Y", "Z", "Ground truth"]
+    TRUTH_TIP = ("Ground-truth target this object matches (point IoU = shared points / all points of both), "
+                 "or false alarm when it matches none. Shown only for inputs with a .truth.json file.")
 
     def __init__(self):
         super().__init__()
         self.rows = []
 
+    @staticmethod
+    def truth_text(o):
+        truth = o.get("truth")
+        if truth is None:
+            return ""
+        if not truth["target_id"]:
+            return "false alarm"
+        return f"{truth['target_id']} · IoU {truth['iou']:.2f}" + ("" if truth["class_correct"] else " · wrong class")
+
     def load(self, objects):
         self.beginResetModel()
-        self.rows = [(o["object_id"], o["class_name"], o["point_count"], o["confidence"], *o["centroid"])
-                     for o in objects]
+        self.rows = [(o["object_id"], f"{o['class_name']} ({o['class_id']})", o["point_count"], o["confidence"],
+                      *o["centroid"], self.truth_text(o)) for o in objects]
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
@@ -106,16 +120,20 @@ class ObjectTable(QAbstractTableModel):
         if role == Qt.DisplayRole:
             if column == 2:
                 return f"{value:,}"
-            return f"{value:.3f}" if column >= 3 else value
+            return f"{value:.3f}" if 3 <= column <= 6 else value
         if role == Qt.UserRole:  # Sort key.
             return value
-        if role == Qt.TextAlignmentRole and column >= 2:
+        if role == Qt.ForegroundRole and column == 7 and value:
+            return QColor("#c0392b") if value == "false alarm" or "wrong" in value else QColor("#1e8449")
+        if role == Qt.TextAlignmentRole and 2 <= column <= 6:
             return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
             return self.HEADERS[section]
+        if role == Qt.ToolTipRole and orientation == Qt.Horizontal and section == 7:
+            return self.TRUTH_TIP
         return None
 
 
@@ -235,7 +253,10 @@ class App(QMainWindow):
                 ("Inspect input", self.inspect, "Read only the file headers to quickly show point count, extent and CRS, and check whether each file can be processed."),
                 ("Process", self.process, "Run the selected model on every listed file to detect and segment objects, saving results to the results directory."),
                 ("Open saved results", self.open_run, "Open a results folder from an earlier run and show it in the table and 3D view."),
-                ("Synthetic demo", self.open_demo, "Open the bundled synthetic example and its results to get familiar with the window.")):
+                ("Synthetic demo", self.open_demo, "Open the bundled synthetic example and its results to get familiar with the window."),
+                ("Metal targets demo", self.open_metal_demo,
+                 "Open real YellowScan river scenes with simulated metal plates and spheres on the riverbed, "
+                 "the model trained on them and its results compared with the known targets.")):
             controls.addWidget(self.button(text, command, tip))
         controls.addStretch()
         layout.addLayout(controls)
@@ -267,6 +288,15 @@ class App(QMainWindow):
         self.reuse_button.setVisible(False)
         run_row.addWidget(self.reuse_button)
         layout.addLayout(run_row)
+        self.evaluation_note = QLabel("")
+        self.evaluation_note.setWordWrap(True)
+        self.evaluation_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.evaluation_note.setToolTip("Detected objects compared with the known (ground-truth) targets of this file.\n"
+                                        "A detection counts when it shares at least a quarter of its points with a target "
+                                        "(point IoU ≥ 0.25).\nType a missed target ID (e.g. T004) in the 3D view's "
+                                        "Find box to see it; colour by Truth to see all of them.")
+        self.evaluation_note.setVisible(False)
+        layout.addWidget(self.evaluation_note)
         splitter = QSplitter(Qt.Horizontal)
         table_side = QWidget()
         table_layout = QVBoxLayout(table_side)
@@ -331,8 +361,10 @@ class App(QMainWindow):
         self.path_row(grid, 0, "Dataset manifest JSON", self.manifest_path, self.pick_manifest,
                       "Dataset manifest JSON listing the point clouds and label files for training, validation and testing.")
         layout.addLayout(grid)
-        hint = QLabel("Labels: point_index,class_id  (0 = background, -1 = unlabelled)")
-        hint.setToolTip("One row per labelled point; positive IDs are target classes.\n"
+        hint = QLabel("Labels: point_index,class_id as ASPRS LAS class codes (blank or -1 = unlabelled), "
+                      "or a LAS/LAZ file")
+        hint.setToolTip("Target classes use the manifest's codes: user-definable 64-255 or a defined ASPRS class "
+                        "such as 43 (submerged object).\nAny other code (0, 2, 40, ...) means the point is not a target.\n"
                         "Train, validation and test must come from different scenes.")
         layout.addWidget(hint)
         row = QHBoxLayout()
@@ -378,10 +410,13 @@ class App(QMainWindow):
 
         self.area = QComboBox()
         self.area.addItems(["unresolved", "convex_hull_xy"])
+        self.las_output = QComboBox()
+        self.las_output.addItems(["same as input", "1.4"])
         fields = [[("Fallback CRS", self.crs), ("Vertical datum", self.datum), (None, self.meters)],
                   [("Score threshold", self.threshold), ("Cluster radius m", self.radius),
                    ("Min object points", self.minimum), ("Area method", self.area)],
-                  [("Neighbours", self.neighbors), ("Max points / file", self.limit)]]
+                  [("Neighbours", self.neighbors), ("Max points / file", self.limit),
+                   ("Classified LAS", self.las_output)]]
         tips = {
             self.crs: "Projected CRS to use when a file has none, e.g. EPSG:32632. Ignored when the file has its own CRS.",
             self.datum: "Name of the vertical datum. It is recorded in the results and does not affect calculations.",
@@ -395,6 +430,10 @@ class App(QMainWindow):
             self.area: "How object area is computed: unresolved leaves Area blank; convex_hull_xy uses the area of the XY convex hull.",
             self.neighbors: "Neighbouring points (3 to 128) used to compute each point's local shape features during training.\n"
                             "Processing uses the model's training value. Higher is smoother but slower; lower is more detailed but more sensitive to noise.",
+            self.las_output: "LAS version of classified.laz, the copy of each input with detected targets classified.\n"
+                             "same as input: LAS 1.4 stays 1.4; LAS 1.2/1.3 stays 1.2/1.3. Those versions store only "
+                             "classes 0-31, so a target code such as 64 is written to the User Data field of its points.\n"
+                             "1.4: always LAS 1.4, where the class field holds every code (64, 65, ...).",
             self.limit: "Maximum points allowed per file; 0 means no limit and the whole file is processed.\n"
                         "A limit guards against processing huge files by mistake; files above it are refused.",
         }
@@ -415,7 +454,7 @@ class App(QMainWindow):
                         threshold=float(self.threshold.text()), cluster_eps=float(self.radius.text()),
                         min_points=int(self.minimum.text()), area_method=self.area.currentText(),
                         crs_override=self.crs.text().strip(), coordinates_in_meters=self.meters.isChecked(),
-                        vertical_datum=self.datum.text().strip())
+                        vertical_datum=self.datum.text().strip(), las_output=self.las_output.currentText())
 
     def log(self, message):
         """Thread-safe: may be called from the worker thread."""
@@ -482,8 +521,24 @@ class App(QMainWindow):
         paths, _ = QFileDialog.getOpenFileNames(self, "Point clouds", "", "Point clouds (*.las *.laz)")
         for path in paths:
             if path not in self.paths:
-                self.paths.append(path)
-                self.inputs.addItem(path)
+                self.add_input(path)
+
+    def add_input(self, path):
+        """List a file with its LAS version and point format, read from the header only."""
+        self.paths.append(path)
+        try:
+            with laspy.open(path) as reader:
+                header = reader.header
+                version, point_format, count = str(header.version), header.point_format.id, header.point_count
+        except Exception as exc:  # Listed anyway; processing reports the problem for this file.
+            self.inputs.addItem(f"{path}    ·    header unreadable: {exc}")
+            return
+        self.inputs.addItem(f"{path}    ·    LAS {version} · point format {point_format} · {count:,} points")
+        self.inputs.item(self.inputs.count() - 1).setToolTip(
+            f"{path}\nLAS {version}, point format {point_format}: "
+            + ("class field holds codes 0-255" if point_format >= 6 else
+               "class field holds codes 0-31 only (target codes above 31 go to User Data unless "
+               "Classified LAS is set to 1.4)"))
 
     def clear_files(self):
         self.paths = []
@@ -557,6 +612,21 @@ class App(QMainWindow):
         if path:
             self.safe_action(lambda: self.load_run(path))
 
+    def open_metal_demo(self):
+        def action():
+            demo = Path(__file__).resolve().parent / "metal_demo"
+            candidates = sorted((demo / "results").glob("*/run_metadata.json"))
+            if not candidates:
+                raise ValueError("Metal targets demo missing; follow README to generate it.")
+            self.model_path.setText(str(demo / "METAL_MODEL.joblib"))
+            self.manifest_path.setText(str(demo / "manifest.json"))
+            self.clear_files()
+            self.add_input(str(demo / "DEVILS_BRIDGE.laz"))
+            self.load_run(candidates[-1].parent)
+            self.reuse_run_settings()
+            self.log("Loaded metal targets demo (real scenes, simulated targets).")
+        self.safe_action(action)
+
     def open_demo(self):
         def action():
             demo = Path(__file__).resolve().parent / "synthetic_demo"
@@ -568,8 +638,7 @@ class App(QMainWindow):
             self.datum.setText("synthetic_local_z")
             self.area.setCurrentText("convex_hull_xy")
             self.clear_files()
-            self.paths = [str(demo / "SYNTHETIC_test.laz")]
-            self.inputs.addItem(self.paths[0])
+            self.add_input(str(demo / "SYNTHETIC_test.laz"))
             self.load_run(candidates[-1].parent)
             self.log("Loaded synthetic demo.")
         self.safe_action(action)
@@ -588,7 +657,9 @@ class App(QMainWindow):
         self.dataset.clear()
         for key, e in self.datasets.items():
             failed_text = "  ✖ failed" if e["status"] == "failed" else ""
-            self.dataset.addItem(f"{key} | {Path(e['source']).name}{failed_text}")
+            version = e.get("input", {}).get("las_version")
+            version_text = f" | LAS {version}" if version else ""
+            self.dataset.addItem(f"{key} | {Path(e['source']).name}{version_text}{failed_text}")
             if failed_text:
                 self.dataset.setItemData(self.dataset.count() - 1, e.get("error", ""), Qt.ToolTipRole)
         self.dataset.blockSignals(False)
@@ -596,6 +667,7 @@ class App(QMainWindow):
             self.view()
         else:
             self.objects.load([])
+            self.show_evaluation(None)
             self.web.setHtml("")
             self.view_note.setText("No datasets to view.")
 
@@ -624,6 +696,7 @@ class App(QMainWindow):
             self.neighbors.setText(str(cfg["neighbors"]))
             self.limit.setText(str(cfg["max_points"]))
             self.area.setCurrentText(cfg["area_method"])
+            self.las_output.setCurrentText(cfg.get("las_output", "same as input"))
             self.crs.setText(cfg["crs_override"])
             self.datum.setText(cfg["vertical_datum"])
             self.meters.setChecked(cfg["coordinates_in_meters"])
@@ -664,6 +737,7 @@ class App(QMainWindow):
             if entry["status"] == "failed":
                 self.objects.load([])
                 self.reset_class_filter()
+                self.show_evaluation(None)
                 self.loaded_page = None
                 self.web.setHtml("")
                 error = entry.get("error", "unknown error")
@@ -672,6 +746,7 @@ class App(QMainWindow):
                 self.view_note.setToolTip(error)
                 return
             folder = self.run_path / entry["result_path"]
+            self.show_evaluation(entry.get("evaluation"))
             self.view_note.setToolTip("")
             self.objects.load(json.loads((folder / "objects.json").read_text(encoding="utf-8")))
             self.reset_class_filter()  # Also writes the point / object count note.
@@ -682,6 +757,28 @@ class App(QMainWindow):
                 # Loaded by URL: setHtml() is limited to 2 MB and the page can be tens of MB.
                 self.web.load(QUrl.fromLocalFile(str(page.resolve())))
         self.safe_action(action)
+
+    def show_evaluation(self, result):
+        if not result:
+            self.evaluation_note.setVisible(False)
+            return
+        def ratio(value):
+            return "–" if value is None else f"{value:.2f}"
+        missed = result["missed_targets"]
+        by_class = ", ".join(f"{name} {ratio(value)}" for name, value in result["recall_by_class"].items())
+        text = (f"<b>Ground truth:</b> {result['true_positives']} of {result['targets']} targets found "
+                f"(recall {ratio(result['recall'])}; {by_class}) · {result['false_positives']} false alarms "
+                f"(precision {ratio(result['precision'])}) · right class {result['class_correct']} of "
+                f"{result['true_positives']} · mean IoU {ratio(result['mean_iou'])}")
+        if result.get("recall_by_visible_points"):
+            text += " · found by points on target: " + ", ".join(
+                f"{k} pts {v}" for k, v in result["recall_by_visible_points"].items())
+        if result["mean_centre_error_m"] is not None:
+            text += f" · mean centre error {result['mean_centre_error_m']:.2f} m"
+        if missed:
+            text += f"<br>Missed: {', '.join(missed)}"
+        self.evaluation_note.setText(text)
+        self.evaluation_note.setVisible(True)
 
     def page_loaded(self, ok):
         if ok and self.sorted_objects.active():

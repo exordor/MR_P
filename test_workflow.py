@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import laspy
 import numpy as np
 
 import core
@@ -17,6 +18,10 @@ from core import refresh_web_view
 from create_demo import create_demo
 from sklearn.cluster import DBSCAN
 
+
+
+REAL_LAS_12 = Path("/Users/jlw/code/MR/data/public/yellowscan_navigator/"
+                   "SW_NAV_60mAGL_5ms_SACLCOmod_EPSG_32633_Barsebackshamn_harbour-F001.las")
 
 
 def web_data(folder):
@@ -173,7 +178,7 @@ class WorkflowTest(unittest.TestCase):
         objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
         self.assertEqual({o[1] for o in data["objects"]}, {o["object_id"] for o in objects})
         self.assertEqual(set(instance) - {0}, {o["instance_index"] for o in objects})
-        self.assertEqual(data["classes"], [[0, "background"], [1, "synthetic_object"]])
+        self.assertEqual(data["classes"], [[0, "not a target"], [64, "synthetic_object"]])
         cls = np.frombuffer(base64.b64decode(data["cls"]), dtype=np.uint8)
         self.assertEqual(len(cls), count)
         self.assertTrue(set(cls[instance > 0]) - {0})  # Object points carry a target class.
@@ -211,7 +216,7 @@ class WorkflowTest(unittest.TestCase):
         dest = self.root / "test_metrics.json"
         evaluate_model(self.model, dest, self.cfg, log=lambda x: None)
         result = json.loads(dest.read_text())
-        self.assertEqual(result["class_order"], [0, 1])
+        self.assertEqual(result["class_order"], [0, 64])
         self.assertIn("confusion_matrix", result)
         mlp_path = self.root / "mlp.joblib"
         train_model(self.manifest, mlp_path, self.cfg, backend="mlp", iterations=2, log=lambda x: None)
@@ -236,6 +241,181 @@ class WorkflowTest(unittest.TestCase):
         cloud = read_cloud(self.manifest.parent / "SYNTHETIC_test.laz", self.cfg)
         shifted = {**cloud, "xyz": cloud["xyz"] + [10000, -10000, 5]}
         self.assertTrue(np.allclose(extract_features(cloud), extract_features(shifted), atol=1e-5))
+
+    def test_bed_height_ignores_a_small_target_on_the_bed(self):
+        grid = np.array([[x, y, 10.0] for x in np.arange(0, 10, 0.2) for y in np.arange(0, 10, 0.2)])
+        target = np.array([[5 + dx, 5 + dy, 10.5] for dx in (-0.2, 0, 0.2) for dy in (-0.2, 0, 0.2)])
+        xyz = np.vstack((grid, target))
+        height, known = core.bed_height(xyz, np.full(len(xyz), 40, dtype=np.uint8))
+        self.assertTrue(known.all())
+        np.testing.assert_allclose(height[len(grid):], 0.5, atol=1e-9)
+        height, known = core.bed_height(xyz, np.full(len(xyz), 2, dtype=np.uint8))
+        self.assertFalse(known.any())
+
+    def test_object_evaluation_matches_one_to_one(self):
+        point_instance = np.array([0, 1, 1, 1, 2, 2, 0, 0, 3, 3])
+        truth_instance = np.array([0, 1, 1, 1, 1, 0, 2, 2, 0, 0])
+        objects = [{"instance_index": i, "object_id": f"O{i}", "class_id": c, "centroid": [0, 0, 0]}
+                   for i, c in ((1, 64), (2, 64), (3, 65))]
+        targets = [{"object_id": "T1", "class_id": 64, "class_name": "metal_plate", "center": [0, 0, 1]},
+                   {"object_id": "T2", "class_id": 65, "class_name": "metal_sphere", "center": [0, 0, 0]}]
+        summary, status = core.evaluate_objects(point_instance, objects, targets, truth_instance)
+        self.assertEqual((summary["true_positives"], summary["false_positives"], summary["missed"]), (1, 2, 1))
+        self.assertEqual(objects[0]["truth"]["target_id"], "T1")
+        self.assertAlmostEqual(objects[0]["truth"]["iou"], 0.75)
+        self.assertTrue(objects[0]["truth"]["class_correct"])
+        self.assertIsNone(objects[1]["truth"]["target_id"])  # T1 is already taken by the better match.
+        self.assertEqual(summary["missed_targets"], ["T2"])
+        np.testing.assert_array_equal(status, [0, 1, 1, 1, 2, 2, 3, 3, 2, 2])
+
+    def test_classified_laz_for_las_1_2_and_1_4(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        original = laspy.read(sample)
+        self.assertEqual((str(original.header.version), original.header.point_format.id), ("1.2", 3))
+        original.classification = np.full(len(original.points), 2, dtype=np.uint8)
+        original.user_data = np.full(len(original.points), 7, dtype=np.uint8)
+        source = self.root / "classes.laz"
+        original.write(source)
+        selected, other = np.arange(5, 15), np.arange(20, 25)
+        instance = np.zeros(len(original.points), dtype=np.int32)
+        instance[selected], instance[other] = 1, 2
+        groups = [(64, selected, 0.9), (6, other, 0.8)]
+        # Same version: LAS 1.2 holds classes 0-31 only, so code 64 goes to User Data; 6 fits the class field.
+        dest = self.root / "classified_12.laz"
+        info = core.write_classified(source, dest, groups, instance)
+        self.assertEqual(info, {"file": "classified_12.laz", "las_version": "1.2", "point_format": 3,
+                                "target_codes_in": "user_data"})
+        result = laspy.read(dest)
+        codes, user = np.asarray(result.classification), np.asarray(result.user_data)
+        self.assertTrue((codes[selected] == 2).all() and (user[selected] == 64).all())
+        self.assertTrue((codes[other] == 6).all() and (user[other] == 7).all())
+        np.testing.assert_array_equal(result.object_instance, instance)
+        np.testing.assert_allclose(result.x, original.x)
+        # Labels read back from that LAS 1.2 file recover the target codes.
+        labels = core.load_labels(dest, len(codes), {64, 6})
+        self.assertTrue((labels[selected] == 64).all() and (labels[other] == 6).all())
+        self.assertEqual(int((labels > 0).sum()), len(selected) + len(other))
+        # LAS 1.4: matching point format, every code in the class field, CRS stored as WKT.
+        dest = self.root / "classified_14.laz"
+        info = core.write_classified(source, dest, groups, instance, "1.4")
+        self.assertEqual((info["las_version"], info["point_format"], info["target_codes_in"]),
+                         ("1.4", 7, "classification"))
+        result = laspy.read(dest)
+        codes = np.asarray(result.classification)
+        self.assertTrue((codes[selected] == 64).all() and (codes[other] == 6).all())
+        self.assertTrue((np.delete(codes, np.r_[selected, other]) == 2).all())
+        self.assertTrue(result.header.global_encoding.wkt)
+        self.assertEqual(result.header.parse_crs().to_epsg(), 32632)
+        np.testing.assert_array_equal(result.intensity, original.intensity)
+        with self.assertRaisesRegex(ValueError, "Classified LAS"):
+            core.validate_settings(Settings(las_output="1.3"))
+
+    @unittest.skipUnless(REAL_LAS_12.exists(), "public YellowScan LAS 1.2 sample not available")
+    def test_real_yellowscan_las_1_2_file(self):
+        las = laspy.read(REAL_LAS_12)
+        self.assertEqual((str(las.header.version), las.header.point_format.id), ("1.2", 3))
+        x, y = np.asarray(las.x), np.asarray(las.y)
+        keep = (np.abs(x - np.median(x)) < 15) & (np.abs(y - np.median(y)) < 15)
+        crop = laspy.LasData(las.header)
+        crop.points = las.points[keep].copy()
+        path = self.root / "real_12.laz"
+        crop.write(path)
+        cloud = read_cloud(path, self.cfg)
+        self.assertEqual(set(np.unique(cloud["classification"])) - {1, 2, 7, 9}, set())
+        self.assertEqual(extract_features(cloud).shape, (keep.sum(), len(core.FEATURES)))
+        run = Path(process_batch([path], self.model, self.root / "real_12_runs", self.cfg, log=lambda x: None))
+        entry = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))["datasets"][0]
+        self.assertTrue(entry["status"].startswith("success"), entry.get("error"))
+        result = laspy.read(run / "datasets" / "D0001" / "classified.laz")
+        self.assertEqual((str(result.header.version), result.header.point_format.id), ("1.2", 3))
+        np.testing.assert_array_equal(np.asarray(result.classification)[np.asarray(result.object_instance) == 0],
+                                      np.asarray(crop.classification)[np.asarray(result.object_instance) == 0])
+
+    def test_labels_from_las_classification(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        las = laspy.convert(laspy.read(sample), point_format_id=7, file_version="1.4")
+        codes = np.full(len(las.points), 40, dtype=np.uint8)
+        codes[:7] = 64
+        codes[7:9] = 2
+        las.classification = codes
+        path = self.root / "labels_as_las.laz"
+        las.write(path)
+        labels = core.load_labels(path, len(codes), {64})
+        np.testing.assert_array_equal(labels, np.where(codes == 64, 64, 0))
+        with self.assertRaisesRegex(ValueError, "point count"):
+            core.load_labels(path, len(codes) + 1, {64})
+
+    def test_csv_labels_are_las_codes(self):
+        path = self.root / "codes.csv"
+        path.write_text("point_index,class_id\n0,64\n1,40\n2,\n3,-1\n4,0\n5,65\n", encoding="utf-8")
+        np.testing.assert_array_equal(core.load_labels(path, 6, {64}), [64, 0, -1, -1, 0, 0])
+        path.write_text("point_index,class_id\n0,256\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "0..255"):
+            core.load_labels(path, 1, {64})
+
+    def test_manifest_classes_must_follow_asprs(self):
+        source = json.loads(self.manifest.read_text())
+        changed = self.manifest.parent / "classes.json"
+        for classes, message in (({"0": "background", "64": "x"}, "remove"), ({"1": "x"}, "no class"),
+                                 ({"0": "x"}, "remove"), ({"30": "x"}, "reserved"), ({}, "at least one")):
+            changed.write_text(json.dumps({**source, "classes": classes}))
+            with self.assertRaisesRegex(ValueError, message):
+                load_manifest(changed)
+        changed.write_text(json.dumps({**source, "classes": {"43": "submerged object", "200": "own class"}}))
+        self.assertEqual(load_manifest(changed)["classes"],
+                         {"0": "not a target", "43": "submerged object", "200": "own class"})
+
+    def test_ground_truth_evaluation_in_batch(self):
+        folder = self.root / "with_truth"
+        folder.mkdir()
+        sample = folder / "scene.laz"
+        shutil.copy2(self.manifest.parent / "SYNTHETIC_test.laz", sample)
+        count = len(read_cloud(sample, self.cfg)["xyz"])
+        # create_demo writes 1800 background points, then two objects of 140 points.
+        targets = [{"object_id": f"T{i}", "class_id": 64, "class_name": "synthetic_object",
+                    "center": [0, 0, 0], "point_range": [1800 + 140 * (i - 1), 1800 + 140 * i]} for i in (1, 2)]
+        targets.append({"object_id": "T3", "class_id": 64, "class_name": "synthetic_object",
+                        "center": [0, 0, 0], "point_indices": [0, 1, 2]})
+        core.truth_path(sample).write_text(json.dumps({"point_count": count, "objects": targets}))
+        run = Path(process_batch([sample], self.model, self.root / "truth_runs", self.cfg, log=lambda x: None))
+        metadata = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))
+        result = metadata["datasets"][0]["evaluation"]
+        self.assertEqual((result["true_positives"], result["missed"], result["false_positives"]), (2, 1, 0))
+        objects = json.loads((run / "datasets" / "D0001" / "objects.json").read_text(encoding="utf-8"))
+        self.assertEqual({o["truth"]["target_id"] for o in objects}, {"T1", "T2"})
+        data = web_data(run / "datasets" / "D0001")
+        self.assertEqual([t[0] for t in data["truth_objects"]], ["T1", "T2", "T3"])
+        self.assertEqual(len(base64.b64decode(data["las"])), count)
+        self.assertTrue((run / "datasets" / "D0001" / "classified.laz").exists())
+        core.truth_path(sample).write_text(json.dumps({"point_count": count + 1, "objects": targets}))
+        run = Path(process_batch([sample], self.model, self.root / "truth_runs", self.cfg, log=lambda x: None))
+        status = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))["datasets"][0]
+        self.assertEqual(status["status"], "failed")
+        self.assertIn("different point cloud", status["error"])
+
+    def test_synthetic_targets_on_a_flat_riverbed(self):
+        import synthetic_targets
+        header = laspy.LasHeader(point_format=7, version="1.4")
+        header.scales, header.offsets = [0.001] * 3, [700000, 6300000, 0]
+        las = laspy.LasData(header)
+        rng = np.random.default_rng(1)
+        n = 40 * 40 * 25
+        las.x, las.y = 700000 + rng.uniform(0, 40, n), 6300000 + rng.uniform(0, 40, n)
+        las.z = rng.normal(80, 0.01, n)
+        las.intensity = np.full(n, 1000, dtype=np.uint16)
+        las.classification = np.full(n, 40, dtype=np.uint8)
+        las.return_number = las.number_of_returns = np.ones(n, dtype=np.uint8)
+        out, labels, targets = synthetic_targets.inject(las, np.ones(n, dtype=bool), rng, 6, "test")
+        self.assertEqual(len(targets), 6)
+        self.assertEqual(len(labels), len(out.points))
+        for target in targets:
+            start, stop = target["point_range"]
+            self.assertTrue((labels[start:stop] == target["class_id"]).all())
+            self.assertGreater(np.min(np.asarray(out.z)[start:stop]), 79.9)
+            self.assertIn(target["class_name"], ("metal_plate", "metal_sphere"))
+        self.assertEqual(int((labels > 0).sum()), sum(t["simulated_points"] for t in targets))
+        self.assertLess(int((labels == 0).sum()), n + 6 * 30)  # The covered riverbed was removed.
+        self.assertGreater(np.median(np.asarray(out.intensity)[labels > 0]), 1000)
 
 
 if __name__ == "__main__":
