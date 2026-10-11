@@ -11,3 +11,4 @@ data/
 *.pem
 *.key
 *.log
+.DS_Store
