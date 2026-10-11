@@ -576,16 +576,11 @@ def process_batch(paths, model_path, output_root, cfg, log=print):
                 writer = csv.writer(stream)
                 writer.writerow(HEADERS)
                 writer.writerows(rows)
-            selected_view = display_indices(point_instance)
-            np.savez_compressed(folder / "view.npz", xyz=cloud["xyz"][selected_view],
-                                point_index=selected_view, instance=point_instance[selected_view],
-                                predicted_class=classes[selected_view], confidence=confidence[selected_view],
-                                origin=cloud["xyz"].mean(axis=0), total_points=len(features))
             web = web_indices(point_instance)
             write_web_view(folder / "view3d.html", Path(path).name, cloud["xyz"][web], point_instance[web],
                            objects, cloud["xyz"].mean(axis=0), len(features))
-            entry["display"] = {"source_points": len(features), "cached_points": len(selected_view),
-                                "limit": DISPLAY_LIMIT, "method": "deterministic representative sampling"}
+            entry["display"] = {"source_points": len(features), "shown_points": len(web), "limit": WEB_LIMIT,
+                                "page": "view3d.html", "method": "object points first, then random background"}
             write_json(folder / "objects.json", objects)
             entry.update(status="success" if objects else "success_no_objects", object_count=len(objects))
             log(f"{dataset_id}: {len(objects)} objects")
@@ -593,7 +588,7 @@ def process_batch(paths, model_path, output_root, cfg, log=print):
             # Never expose partial outputs as successful objects.
             for dest in exported:
                 dest.unlink(missing_ok=True)
-            for filename in ("report.csv", "view.npz", "view3d.html", "objects.json"):
+            for filename in ("report.csv", "view3d.html", "objects.json"):
                 (folder / filename).unlink(missing_ok=True)
             entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
             log(f"{dataset_id}: FAILED: {exc}")

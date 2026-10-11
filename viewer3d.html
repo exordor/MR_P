@@ -39,6 +39,7 @@
 </div>
 <div id="help">Drag: rotate · Right-drag or Shift-drag: pan · Wheel: zoom · Double-click: reset</div>
 <script id="data" type="application/json">/*DATA*/</script>
+<script src="view3d_focus.js"></script>
 <script>
 "use strict";
 const D = JSON.parse(document.getElementById("data").textContent);
@@ -196,6 +197,7 @@ document.getElementById("colour").addEventListener("change", colours);
 document.getElementById("size").addEventListener("input", draw);
 reset();
 colours();
+if (window.FOCUS) { document.getElementById("find").value = window.FOCUS; document.getElementById("go").click(); }
 </script>
 </body>
 </html>

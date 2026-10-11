@@ -8,17 +8,14 @@ import sys
 import threading
 import webbrowser
 import tkinter as tk
-import zipfile
 from dataclasses import asdict
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.figure import Figure
 
-from core import (DISPLAY_LIMIT, Settings, display_indices, evaluate_model, label_template, process_batch,
-                  read_cloud, train_model, write_web_view)
+from core import (Settings, evaluate_model, label_template, process_batch, read_cloud, train_model,
+                  write_web_view)
 
 
 def tooltip(widget, text):
@@ -62,9 +59,7 @@ class App(tk.Tk):
         self.busy = False
         self.paths = []
         self.run_path = None
-        self.current_data = None
-        self.selected_object = None
-        self.show_objects = tk.BooleanVar(value=False)
+        self.current_objects = []
         self.meters = tk.BooleanVar(value=False)
         self.model_path = tk.StringVar()
         self.manifest_path = tk.StringVar()
@@ -78,7 +73,6 @@ class App(tk.Tk):
         self.limit = tk.StringVar(value="0")
         self.backend = tk.StringVar(value="random_forest")
         self.iterations = tk.StringVar(value="100")
-        self.display_limit = tk.StringVar(value=str(DISPLAY_LIMIT))
         self.area = tk.StringVar(value="unresolved")
         self.build_ui()
         self.after(100, self.poll)
@@ -109,31 +103,29 @@ class App(tk.Tk):
         viewer_controls.grid(row=4, column=0, columnspan=3, sticky="ew", pady=6)
         self.dataset = ttk.Combobox(viewer_controls, state="readonly", width=45)
         self.dataset.pack(side="left")
-        ttk.Button(viewer_controls, text="View", command=self.view).pack(side="left", padx=8)
-        browser = ttk.Button(viewer_controls, text="3D in browser", command=self.open_browser_view)
-        browser.pack(side="left")
-        tooltip(browser, "Smooth GPU view of up to 3,000,000 points.\nClick a point to identify its object.")
-        ttk.Checkbutton(viewer_controls, text="Show objects", variable=self.show_objects,
-                        command=self.redraw).pack(side="left")
-        ttk.Label(viewer_controls, text="Display points").pack(side="left", padx=(12, 4))
-        ttk.Combobox(viewer_controls, textvariable=self.display_limit,
-                     values=["1000", "5000", "10000", "30000"], state="readonly", width=8).pack(side="left")
-        ttk.Button(viewer_controls, text="Apply", command=self.view).pack(side="left", padx=4)
-        self.view_note = ttk.Label(processing, text="")
-        self.view_note.grid(row=5, column=0, columnspan=3, sticky="w")
+        self.dataset.bind("<<ComboboxSelected>>", lambda e: self.view())
+        browser = ttk.Button(viewer_controls, text="Open 3D view", command=self.open_browser_view)
+        browser.pack(side="left", padx=8)
+        tooltip(browser, "Opens in your web browser; drawn by the graphics card (up to 3,000,000 points).\n"
+                         "Double-click an object below to open the view centred on it.")
+        self.view_note = ttk.Label(viewer_controls, text="")
+        self.view_note.pack(side="left", padx=8)
         body = ttk.Frame(processing)
-        body.grid(row=6, column=0, columnspan=3, sticky="nsew")
-        self.figure = Figure(figsize=(7, 4), dpi=100)
-        self.canvas = FigureCanvasTkAgg(self.figure, master=body)
-        self.canvas.get_tk_widget().pack(side="left", fill="both", expand=True)
-        self.object_list = tk.Listbox(body, width=28, exportselection=False)
-        self.object_list.pack(side="right", fill="y")
-        self.object_list.bind("<<ListboxSelect>>", self.select_object)
-        toolbar_frame = ttk.Frame(processing)
-        toolbar_frame.grid(row=7, column=0, columnspan=3, sticky="ew")
-        NavigationToolbar2Tk(self.canvas, toolbar_frame)
+        body.grid(row=5, column=0, columnspan=3, sticky="nsew")
+        columns = ("class", "points", "confidence", "x", "y", "z")
+        self.object_list = ttk.Treeview(body, columns=columns, selectmode="browse")
+        self.object_list.heading("#0", text="Object ID")
+        self.object_list.column("#0", width=150)
+        for name, title in zip(columns, ("Class", "Points", "Confidence", "X", "Y", "Z")):
+            self.object_list.heading(name, text=title)
+            self.object_list.column(name, width=110, anchor="w" if name == "class" else "e")
+        scroll = ttk.Scrollbar(body, orient="vertical", command=self.object_list.yview)
+        self.object_list.configure(yscrollcommand=scroll.set)
+        self.object_list.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.object_list.bind("<Double-1>", lambda e: self.open_browser_view(self.object_list.focus() or None))
         processing.columnconfigure(1, weight=1)
-        processing.rowconfigure(6, weight=1)
+        processing.rowconfigure(5, weight=1)
         self.path_row(training, "Dataset manifest JSON", self.manifest_path, self.pick_manifest, 0)
         labels_hint = ttk.Label(training, text="Labels: point_index,class_id  (0 = background, -1 = unlabelled)")
         labels_hint.grid(row=1, column=0, columnspan=3, sticky="w", pady=15)
@@ -336,8 +328,6 @@ class App(tk.Tk):
             self.paths = [str(demo / "SYNTHETIC_test.laz")]
             self.inputs.insert("end", self.paths[0])
             self.load_run(candidates[-1].parent)
-            self.show_objects.set(True)
-            self.view()
             self.log("Loaded synthetic demo.")
         self.safe_action(action)
 
@@ -346,105 +336,52 @@ class App(tk.Tk):
         metadata = json.loads((self.run_path / "run_metadata.json").read_text(encoding="utf-8"))
         self.datasets = {e["dataset_id"]: e for e in metadata["datasets"] if e["status"].startswith("success")}
         self.dataset["values"] = [f"{key} | {Path(e['source']).name}" for key, e in self.datasets.items()]
-        self.current_data = None
-        self.figure.clear()
-        self.canvas.draw_idle()
-        self.object_list.delete(0, "end")
+        self.current_objects = []
+        self.object_list.delete(*self.object_list.get_children())
         failed = sum(e["status"] == "failed" for e in metadata["datasets"])
         self.log(f"Loaded {len(self.datasets)} datasets, {failed} failed")
         if self.datasets:
             self.dataset.current(0)
+            self.view()
         else:
             self.dataset.set("")
             self.view_note.configure(text="No datasets to view.")
 
+    def selected_folder(self):
+        if not self.run_path or not self.dataset.get():
+            raise ValueError("Process a dataset or open saved results first")
+        key = self.dataset.get().split(" | ", 1)[0]
+        return key, self.run_path / self.datasets[key]["result_path"]
+
     def view(self):
         def action():
-            if not self.run_path or not self.dataset.get():
-                raise ValueError("Process a dataset or open saved results first")
-            key = self.dataset.get().split(" | ", 1)[0]
-            folder = self.run_path / self.datasets[key]["result_path"]
+            key, folder = self.selected_folder()
             self.current_objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
-            cache = folder / "view.npz"
-            # Reject oversized legacy caches before decompressing full arrays.
-            with zipfile.ZipFile(cache) as archive:
-                if sum(item.file_size for item in archive.infolist()) > 32 * 1024 * 1024:
-                    raise ValueError("Saved display cache is too large. Reprocess with this version to create a downsampled cache.")
-            with np.load(cache, allow_pickle=False) as data:
-                xyz, instance = data["xyz"], data["instance"]
-                indices = display_indices(instance, int(self.display_limit.get()))
-                origin = data["origin"] if "origin" in data else xyz.mean(axis=0)
-                total = int(data["total_points"]) if "total_points" in data else len(xyz)
-                self.current_data = (xyz[indices], instance[indices], origin)
-            self.selected_object = None
-            self.object_list.delete(0, "end")
+            self.object_list.delete(*self.object_list.get_children())
             for obj in self.current_objects:
-                self.object_list.insert("end", f"{obj['object_id']} ({obj['class_name']})")
-            self.view_note.configure(text=f"{len(indices):,} / {total:,} points shown · {len(self.current_objects)} objects")
-            self.redraw()
+                self.object_list.insert("", "end", iid=obj["object_id"], text=obj["object_id"], values=(
+                    obj["class_name"], f"{obj['point_count']:,}", f"{obj['confidence']:.3f}",
+                    *(f"{v:.3f}" for v in obj["centroid"])))
+            total = self.datasets[key].get("input", {}).get("point_count")
+            points = f"{total:,} points · " if total else ""
+            self.view_note.configure(text=f"{points}{len(self.current_objects):,} objects")
         self.safe_action(action)
 
-    def open_browser_view(self):
+    def open_browser_view(self, object_id=None):
         def action():
-            if not self.run_path or not self.dataset.get():
-                raise ValueError("Process a dataset or open saved results first")
-            key = self.dataset.get().split(" | ", 1)[0]
-            folder = self.run_path / self.datasets[key]["result_path"]
+            key, folder = self.selected_folder()
             page = folder / "view3d.html"
             if not page.exists():  # Results saved before the browser view existed: use the display cache.
                 objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
                 with np.load(folder / "view.npz", allow_pickle=False) as data:
                     write_web_view(page, Path(self.datasets[key]["source"]).name, data["xyz"], data["instance"],
                                    objects, data["origin"], int(data["total_points"]))
+            # The page reads this to centre on an object; URL fragments are not reliable for local files.
+            (folder / "view3d_focus.js").write_text(f"window.FOCUS = {json.dumps(object_id)};\n", encoding="utf-8")
             webbrowser.open(page.resolve().as_uri())
+            if object_id:
+                self.log(f"Opening 3D view at {object_id}")
         self.safe_action(action)
-
-    def select_object(self, event=None):
-        selection = self.object_list.curselection()
-        if selection:
-            obj = self.current_objects[selection[0]]
-            self.selected_object = obj["instance_index"]
-            self.show_objects.set(True)
-            self.log(f"{obj['object_id']}: {obj['point_count']} points, confidence={obj['confidence']:.3f}")
-            self.redraw()
-
-    def redraw(self):
-        if self.current_data is None:
-            return
-        xyz, instance, origin = self.current_data
-        local = xyz - origin
-        camera = None
-        if self.figure.axes:
-            old = self.figure.axes[0]
-            camera = (old.elev, old.azim, old.roll)
-        self.figure.clear()
-        ax = self.figure.add_subplot(111, projection="3d")
-        ax.mouse_init(rotate_btn=1, pan_btn=2, zoom_btn=3)
-        if camera is not None:
-            ax.view_init(*camera)
-        colors = np.tile([0.58, 0.62, 0.67, 0.28], (len(xyz), 1))
-        if self.show_objects.get():
-            from matplotlib import colormaps
-            for obj in self.current_objects:
-                idx = obj["instance_index"]
-                # Golden-angle hues keep distinct colours beyond the first 20 objects.
-                color = colormaps["hsv"]((idx * 0.61803398875) % 1)
-                colors[instance == idx] = color
-            if self.selected_object:
-                colors[(instance > 0) & (instance != self.selected_object), 3] = 0.18
-        ax.scatter(*local.T, c=colors, s=3, depthshade=False)
-        span = np.ptp(local, axis=0)
-        ax.set_box_aspect(np.maximum(span, 0.1))
-        ax.set(xlabel="X relative (m)", ylabel="Y relative (m)", zlabel="Z relative (m)")
-        from matplotlib.ticker import MaxNLocator
-        ax.zaxis.set_major_locator(MaxNLocator(nbins=2))
-        ax.tick_params(labelsize=8, pad=1)
-        if self.selected_object and self.show_objects.get():
-            obj = next(o for o in self.current_objects if o["instance_index"] == self.selected_object)
-            center = np.asarray(obj["centroid"]) - origin
-            ax.text(*center, obj["object_id"], fontsize=8)
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
 
     def close_app(self):
         if self.busy:

@@ -17,6 +17,12 @@ from create_demo import create_demo
 from sklearn.cluster import DBSCAN
 
 
+
+def web_data(folder):
+    page = (Path(folder) / "view3d.html").read_text(encoding="utf-8")
+    return json.loads(page.split('type="application/json">', 1)[1].split("</script>", 1)[0])
+
+
 class WorkflowTest(unittest.TestCase):
     def test_display_sampling_bounds_and_preserves_small_objects(self):
         instance = np.zeros(100_000, dtype=np.int32)
@@ -62,22 +68,23 @@ class WorkflowTest(unittest.TestCase):
                 rows = list(reader)
             self.assertEqual(len(rows), 2)
             objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
-            with np.load(folder / "view.npz", allow_pickle=False) as cached:
-                self.assertEqual(int(cached["total_points"]), len(original))
-                np.testing.assert_allclose(cached["origin"], original.mean(axis=0))
-                self.assertTrue(np.array_equal(cached["xyz"], original))
-                self.assertTrue(np.array_equal(cached["point_index"], np.arange(len(original))))
-                for row, obj in zip(rows, objects):
-                    object_id = row["object ID"]
-                    self.assertNotIn(object_id, all_ids)
-                    all_ids.add(object_id)
-                    self.assertEqual(object_id, obj["object_id"])
-                    point_file = run / "objects" / f"{object_id}.csv"
-                    points = np.loadtxt(point_file, delimiter=",", skiprows=1, encoding="utf-8-sig")
-                    self.assertEqual(len(points), int(row["Nr_of_points"]))
-                    self.assertTrue(np.allclose(points.mean(axis=0), [float(row[k]) for k in ("x", "y", "z")]))
-                    self.assertTrue(np.array_equal(points, original[cached["instance"] == obj["instance_index"]]))
-                    self.assertGreaterEqual(float(row["confidence"]), self.cfg.threshold)
+            view = web_data(folder)
+            self.assertEqual(view["total"], len(original))
+            shown = np.frombuffer(base64.b64decode(view["xyz"]), dtype="<f4").reshape(-1, 3)
+            np.testing.assert_allclose(shown, original - original.mean(axis=0), atol=1e-3)
+            instance = np.frombuffer(base64.b64decode(view["instance"]), dtype="<i4")
+            # Small cloud: every point is in the view, in source order.
+            for row, obj in zip(rows, objects):
+                object_id = row["object ID"]
+                self.assertNotIn(object_id, all_ids)
+                all_ids.add(object_id)
+                self.assertEqual(object_id, obj["object_id"])
+                point_file = run / "objects" / f"{object_id}.csv"
+                points = np.loadtxt(point_file, delimiter=",", skiprows=1, encoding="utf-8-sig")
+                self.assertEqual(len(points), int(row["Nr_of_points"]))
+                self.assertTrue(np.allclose(points.mean(axis=0), [float(row[k]) for k in ("x", "y", "z")]))
+                self.assertTrue(np.array_equal(points, original[instance == obj["instance_index"]]))
+                self.assertGreaterEqual(float(row["confidence"]), self.cfg.threshold)
         other = Path(process_batch([sample], self.model, self.root / "runs", self.cfg, log=lambda x: None))
         self.assertNotEqual(run, other)
 
@@ -119,8 +126,7 @@ class WorkflowTest(unittest.TestCase):
         sample = self.manifest.parent / "SYNTHETIC_test.laz"
         run = Path(process_batch([sample], self.model, self.root / "web", self.cfg, log=lambda x: None))
         folder = run / "datasets" / "D0001"
-        page = (folder / "view3d.html").read_text(encoding="utf-8")
-        data = json.loads(page.split('type="application/json">', 1)[1].split("</script>", 1)[0])
+        data = web_data(folder)
         count = len(read_cloud(sample, self.cfg)["xyz"])
         self.assertEqual(data["total"], count)
         self.assertEqual(len(base64.b64decode(data["xyz"])), count * 12)

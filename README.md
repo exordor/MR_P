@@ -45,7 +45,7 @@ The demonstration contains no real YellowScan measurements. Its trained model an
 4. Create a dataset manifest using `manifest_example.json`. Separate independent scenes or non-overlapping regions into train, validation and test sets. Use the same `scene_id` for overlapping data; the software checks duplicate paths, identical file content and cross-split scene IDs, but cannot prove that different files do not overlap spatially.
 5. Select the manifest in **Train and Evaluate**, choose a backend and training iterations, and save a new model. Every declared class must appear in the training labels. Validation metrics and model settings are saved alongside the model. Test labels are used only when **Evaluate held-out test set** is clicked.
 6. In **Process and View**, select a trusted trained model, one or more input files, and a results directory. Files run sequentially; a failed file does not stop the remaining batch.
-7. Click **View**, toggle **Show objects**, and select an object ID in the list. Left drag rotates, middle drag pans, and right drag zooms. Saved results can be reopened without rerunning inference or reading the original input file.
+7. The object table lists every detected object. Click **Open 3D view** to see the cloud in your web browser, or double-click an object to open the view centred on it. Saved results can be reopened without rerunning inference or reading the original input file.
 
 ## Outputs and definitions
 
@@ -60,7 +60,7 @@ run_directory/
     D0001/
       report.csv
       objects.json
-      view.npz
+      view3d.html
       status.json
 ```
 
@@ -76,7 +76,7 @@ object ID,x,y,z,Nr_of_points,Intensity,Area,confidence
 - **Area** is blank by default (`unresolved`). An explicitly selected `convex_hull_xy` computes the horizontal convex-hull footprint in square metres. It fills concavities and holes and is not 3D surface area. The method needs project approval before acceptance.
 - **Confidence** is the mean winning-class probability of the points assigned to the final instance. It is uncalibrated and is not measured detection accuracy.
 
-Processing and CSV export use original points without downsampling. Each processed file also gets `view3d.html`, an offline page that draws up to 3,000,000 points with the GPU (WebGL); object points get at least half of that budget. Open it with **3D in browser**. Drag to rotate, right-drag to pan, scroll to zoom, click a point to identify its object, or type an object ID to jump to it. Measured on Devil's Bridge: 3 M points render in about 5 ms per frame. The page is about 22 bytes per shown point, so up to about 66 MB. New display caches contain at most 30,000 deterministically sampled original points, preserving an example of each detected instance where the budget permits. The viewer offers 1,000, 5,000, 10,000 or 30,000 display points; click Apply after choosing. Display sampling does not change inference, object coordinates, reports or CSV exports. Oversized legacy caches are rejected before decompression and must be regenerated. Object IDs match across the report, object files and viewer cache. Source mapping is retained through per-dataset reports and metadata. CSV is UTF-8 with a BOM; missing values use blank cells and JSON nulls.
+Processing and CSV export use original points without downsampling. Each processed file also gets `view3d.html`, an offline page that draws up to 3,000,000 points with the GPU (WebGL); object points get at least half of that budget. Open it with **Open 3D view**. Drag to rotate, right-drag to pan, scroll to zoom, click a point to identify its object, or type an object ID to jump to it. Measured on Devil's Bridge: 3 M points render in about 5 ms per frame. The page is about 22 bytes per shown point, so up to about 66 MB. Display sampling does not change inference, object coordinates, reports or CSV exports. Results saved by earlier versions (with `view.npz`) still open; their 3D view shows the 30,000 cached points. Object IDs match across the report, object files and 3D view. Source mapping is retained through per-dataset reports and metadata. CSV is UTF-8 with a BOM; missing values use blank cells and JSON nulls.
 
 ## Scope and limits
 

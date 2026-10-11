@@ -11,13 +11,13 @@ The prototype runs as one local Python desktop process. A GUI thread handles int
 | Feature preparation | Preserve original point mapping; calculate local geometry, intensity, return and scan-angle features | NumPy, SciPy and cKDTree |
 | Model management | Train RF or MLP, validate, save/reload schema and settings, predict point classes and scores | scikit-learn and joblib |
 | Instance grouping and properties | Per-class global clustering, batch-unique IDs, centroids, counts, intensity, agreed area and confidence | DBSCAN, NumPy and SciPy |
-| Export and visualisation | Per-object XYZ CSV, per-dataset reports, run metadata and reopenable 3D cache | CSV, JSON, NPZ and Matplotlib |
+| Export and visualisation | Per-object XYZ CSV, per-dataset reports, run metadata and reopenable 3D view | CSV, JSON and offline WebGL HTML |
 
 ## Data flow
 
 LAS/LAZ import produces original double-precision coordinates and attributes. Feature calculations use translated local coordinates to avoid unnecessary sensitivity to large map offsets. Predictions retain the original record order. Per-class clustering produces final instance membership; all exported object properties are calculated from the original assigned coordinates.
 
-The viewer subtracts the scene centre and samples points for display. It reads the saved NPZ and object metadata. The display transformation and sampling do not change reports or CSV exports.
+The 3D view (`view3d.html`) subtracts the scene centre and samples up to 3,000,000 points, object points first, and is drawn by the browser's GPU. The display transformation and sampling do not change reports or CSV exports.
 
 Training consumes labelled independent scenes. The manifest explicitly separates train, validation and test datasets. A model stores its class definitions, feature schema, neighbour count, preprocessing settings, provenance and validation results. Independent test evaluation is a separate user action.
 
@@ -35,4 +35,4 @@ The current processing strategy is full-file CPU execution, with explicit size l
 
 ## Display memory update
 
-The application is titled Object Detection. Processing creates a separate display cache with at most 30,000 original points, deterministic instance representatives and original point indices. The UI can reduce this to 1,000, 5,000 or 10,000 points. Reports and exports retain full-resolution detected points. Legacy NPZ caches above 32 MiB uncompressed are rejected before decompression. Processing has no default point limit; whole files are processed in memory, with a RAM estimate checked before decoding and chunked, multi-core feature extraction and clustering.
+The application is titled Object Detection. The desktop window lists objects and opens the browser 3D view; it no longer draws points itself. Reports and exports retain full-resolution detected points. Processing has no default point limit; whole files are processed in memory, with a RAM estimate checked before decoding and chunked, multi-core feature extraction and clustering.
