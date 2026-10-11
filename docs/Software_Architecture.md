@@ -31,8 +31,8 @@ Voxelisation must retain an explicit mapping back to original points. Tiled proc
 
 Target classes, annotation effort, final train/validation/test scenes, area definition, intensity and confidence treatment, output precision, supported platform versions, hardware, object-level quality metrics and acceptance thresholds remain project decisions. See the original v0.2 requirements.
 
-The current processing strategy is full-file CPU execution, with explicit size limits. It does not provide learning-based instance separation, full-waveform integration, large-cloud tiling or cross-file duplicate merging.
+Processing is CPU execution over spatial tiles streamed from each file, with results identical to whole-file processing. It does not provide learning-based instance separation, full-waveform integration, level-of-detail display of a whole survey or cross-file duplicate merging.
 
 ## Display memory update
 
-The application is titled Object Detection. The desktop window shows a sortable object table beside the embedded 3D view; selecting in either one selects in the other. Reports and exports retain full-resolution detected points. Processing has no default point limit; whole files are processed in memory, with a RAM estimate checked before decoding and chunked, multi-core feature extraction and clustering.
+The application is titled Object Detection. The desktop window shows a sortable object table beside the embedded 3D view; selecting in either one selects in the other. Reports and exports retain full-resolution detected points. Processing has no default point limit; files are streamed and processed in spatial tiles (memory about 40 bytes per point plus one tile), with a RAM and disk estimate checked before decoding and multi-core feature extraction, classification and clustering.
