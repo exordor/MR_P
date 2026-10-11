@@ -35,4 +35,4 @@ The current processing strategy is full-file CPU execution, with explicit size l
 
 ## Display memory update
 
-The application is titled Object Detection. Processing creates a separate display cache with at most 30,000 original points, deterministic instance representatives and original point indices. The UI can reduce this to 1,000, 5,000 or 10,000 points. Reports and exports retain full-resolution detected points. Legacy NPZ caches above 32 MiB uncompressed are rejected before decompression. The default 500,000-point processing limit remains; this update does not implement large-cloud tiled inference.
+The application is titled Object Detection. Processing creates a separate display cache with at most 30,000 original points, deterministic instance representatives and original point indices. The UI can reduce this to 1,000, 5,000 or 10,000 points. Reports and exports retain full-resolution detected points. Legacy NPZ caches above 32 MiB uncompressed are rejected before decompression. Processing has no default point limit; whole files are processed in memory, with a RAM estimate checked before decoding and chunked, multi-core feature extraction and clustering.

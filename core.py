@@ -8,6 +8,7 @@ import os
 import platform
 import uuid
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,8 +18,9 @@ import laspy
 import numpy as np
 import sklearn
 from pyproj import CRS
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 from scipy.spatial import ConvexHull, QhullError, cKDTree
-from sklearn.cluster import DBSCAN
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import classification_report, confusion_matrix
@@ -28,6 +30,9 @@ from sklearn.preprocessing import StandardScaler
 
 VERSION = "0.1.0-prototype"
 DISPLAY_LIMIT = 30_000
+# Measured peak on real YellowScan files is ~330 bytes per point; keep headroom.
+BYTES_PER_POINT = 600
+WORKERS = os.cpu_count() or 1
 HEADERS = ["object ID", "x", "y", "z", "Nr_of_points", "Intensity", "Area", "confidence"]
 FEATURES = ["local_height", "roughness", "linearity", "planarity", "sphericity",
             "radius", "relative_intensity", "raw_intensity_scaled", "return_position",
@@ -37,7 +42,7 @@ FEATURES = ["local_height", "roughness", "linearity", "planarity", "sphericity",
 @dataclass
 class Settings:
     neighbors: int = 20
-    max_points: int = 500_000
+    max_points: int = 0  # 0 = no limit; whole file is processed
     threshold: float = 0.7
     cluster_eps: float = 0.3
     min_points: int = 10
@@ -60,12 +65,28 @@ def sha256(path):
 
 
 def validate_settings(cfg):
-    if not 3 <= cfg.neighbors <= 128 or not 10 <= cfg.max_points <= 2_000_000:
-        raise ValueError("neighbors must be 3..128; max_points must be 10..2000000")
+    if not 3 <= cfg.neighbors <= 128 or not (cfg.max_points == 0 or cfg.max_points >= 10):
+        raise ValueError("neighbors must be 3..128; max_points must be 0 (no limit) or at least 10")
     if not 0 <= cfg.threshold <= 1 or cfg.cluster_eps <= 0 or cfg.min_points < 2:
         raise ValueError("Invalid probability threshold / cluster radius / minimum points")
     if cfg.area_method not in ("unresolved", "convex_hull_xy"):
         raise ValueError("Unsupported area method")
+
+
+def physical_memory():
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (AttributeError, ValueError, OSError):  # Windows: no sysconf; skip the check.
+        return None
+
+
+def check_memory(count):
+    """Refuse early, before decoding, when a file clearly cannot fit in RAM."""
+    total = physical_memory()
+    need = count * BYTES_PER_POINT
+    if total and need > total * 0.8:
+        raise ValueError(f"{count:,} points needs about {need / 1024**3:.1f} GB RAM; this computer has "
+                         f"{total / 1024**3:.1f} GB. Split the file (e.g. by area) before processing.")
 
 
 def read_cloud(path, cfg):
@@ -77,8 +98,10 @@ def read_cloud(path, cfg):
         count = reader.header.point_count
         if count < 3:
             raise ValueError("Point cloud must contain at least 3 points")
-        if count > cfg.max_points:
-            raise ValueError(f"{count:,} points exceeds prototype limit {cfg.max_points:,}; no silent downsampling")
+        if cfg.max_points and count > cfg.max_points:
+            raise ValueError(f"{count:,} points exceeds the Max points / file setting {cfg.max_points:,} "
+                             "(set it to 0 for no limit); no silent downsampling")
+        check_memory(count)
         header = reader.header
         cloud = reader.read()
     xyz = np.column_stack((cloud.x, cloud.y, cloud.z)).astype(np.float64)
@@ -138,15 +161,16 @@ def read_cloud(path, cfg):
     }
 
 
-def extract_features(cloud, neighbors=20):
-    """Full resolution; query in chunks to bound the N*k temporary arrays."""
+def extract_features(cloud, neighbors=20, log=None):
+    """Full resolution; chunks bound the N*k temporaries and run on all CPU cores."""
     xyz = cloud["xyz"]
     local = xyz - xyz[0]
     tree = cKDTree(local)
     k = min(neighbors, len(xyz))
     features = np.empty((len(xyz), len(FEATURES)), dtype=np.float32)
     rn, nr = cloud["return_number"], cloud["number_of_returns"]
-    for start in range(0, len(xyz), 8192):
+
+    def chunk(start):
         stop = min(start + 8192, len(xyz))
         distances, idx = tree.query(local[start:stop], k=k, workers=1)
         points = local[idx]
@@ -167,6 +191,12 @@ def extract_features(cloud, neighbors=20):
             (~invalid & (n > 1)), (~invalid & (r == n)),
             cloud["scan_angle"][start:stop] / 90, invalid,
         ))
+    starts = range(0, len(xyz), 8192)
+    # Threads share the arrays; numpy/scipy release the GIL, and slices are disjoint.
+    with ThreadPoolExecutor(WORKERS) as pool:
+        for done, _ in enumerate(pool.map(chunk, starts), 1):
+            if log and len(starts) > 100 and done % (len(starts) // 4) == 0:
+                log(f"  features {100 * done // len(starts)}%")
     if not np.isfinite(features).all():
         raise ValueError("Non-finite features")
     return features
@@ -254,7 +284,7 @@ def collect(records, split, cfg, classes, log):
         if not set(np.unique(labels[selected])) <= {int(k) for k in classes}:
             raise ValueError("Label class not defined in manifest")
         count += int(selected.sum())
-        if count > cfg.max_points:
+        if cfg.max_points and count > cfg.max_points:
             raise ValueError("Total labelled points in split exceeds prototype max_points limit")
         xs.append(extract_features(cloud, cfg.neighbors)[selected])
         ys.append(labels[selected])
@@ -349,6 +379,57 @@ def make_run_directory(first_path, output_root):
     raise FileExistsError("Too many duplicate run directories")
 
 
+def predict(estimator, features):
+    """Class probabilities in bounded batches, using all cores for random forests."""
+    if hasattr(estimator, "n_jobs"):
+        estimator.n_jobs = WORKERS
+    return np.concatenate([estimator.predict_proba(features[a:a + 1_000_000])
+                           for a in range(0, len(features), 1_000_000)])
+
+
+def dbscan(points, eps, min_points, chunk=32768):
+    """DBSCAN with memory bounded by chunk size instead of the whole neighbour graph.
+
+    Core points (>= min_points within eps, self included) and their clusters match
+    scikit-learn exactly. A border point joins the cluster of its nearest core point.
+    """
+    n = len(points)
+    tree = cKDTree(points)
+    counts = np.concatenate([tree.query_ball_point(points[a:a + chunk], eps, return_length=True, workers=WORKERS)
+                             for a in range(0, n, chunk)])
+    core = np.flatnonzero(counts >= min_points)
+    labels = np.full(n, -1, dtype=np.int64)
+    if not len(core):
+        return labels
+    core_xyz = points[core]
+    core_tree = cKDTree(core_xyz)
+    root = np.arange(len(core))  # Representative (smallest member) of each core point's cluster.
+    for a in range(0, len(core), chunk):
+        pairs = cKDTree(core_xyz[a:a + chunk]).sparse_distance_matrix(core_tree, eps, output_type="ndarray")
+        i, j = root[pairs["i"] + a], root[pairs["j"]]
+        keep = i != j
+        if not keep.any():
+            continue
+        nodes, inverse = np.unique(np.concatenate((i[keep], j[keep])), return_inverse=True)
+        m = int(keep.sum())
+        graph = coo_matrix((np.ones(m, dtype=np.int8), (inverse[:m], inverse[m:])), shape=(len(nodes), len(nodes)))
+        _, component = connected_components(graph, directed=False)
+        smallest = np.full(component.max() + 1, len(core))
+        np.minimum.at(smallest, component, nodes)
+        mapping = np.arange(len(core))
+        mapping[nodes] = smallest[component]
+        root = mapping[root]
+    labels[core] = np.unique(root, return_inverse=True)[1]
+    border = np.flatnonzero(counts < min_points)
+    for a in range(0, len(border), chunk):
+        ids = border[a:a + chunk]
+        dist, nearest = core_tree.query(points[ids], k=1, distance_upper_bound=np.nextafter(eps, np.inf),
+                                        workers=WORKERS)
+        found = np.isfinite(dist)
+        labels[ids[found]] = labels[core[nearest[found]]]
+    return labels
+
+
 def instance_groups(xyz, classes, probabilities, cfg):
     """Global per-file clustering: no processing tiles, hence no tile duplicates."""
     groups = []
@@ -358,16 +439,12 @@ def instance_groups(xyz, classes, probabilities, cfg):
         idx = np.flatnonzero((classes == cls) & (probabilities >= cfg.threshold))
         if len(idx) < cfg.min_points:
             continue
-        # Sparse radius graph is built one row at a time. Cap adjacency to avoid
-        # DBSCAN's quadratic-memory worst case on duplicate / very dense clouds.
-        local = xyz[idx] - xyz[idx[0]]
-        tree = cKDTree(local)
-        counts = tree.query_ball_point(local, cfg.cluster_eps, return_length=True)
-        if int(counts.sum()) > 5_000_000:
-            raise ValueError("Clustering neighbourhood too dense; reduce radius / prepare smaller ROI")
-        labels = DBSCAN(eps=cfg.cluster_eps, min_samples=cfg.min_points, n_jobs=1).fit_predict(local)
-        for label in sorted(set(labels) - {-1}):
-            object_idx = idx[labels == label]
+        labels = dbscan(xyz[idx] - xyz[idx[0]], cfg.cluster_eps, cfg.min_points)
+        # One sort instead of a full scan per cluster; stable, so point order is kept.
+        order = np.argsort(labels, kind="stable")
+        bounds = np.searchsorted(labels[order], np.arange(labels.max() + 2))
+        for label in range(labels.max() + 1):
+            object_idx = idx[order[bounds[label]:bounds[label + 1]]]
             if len(object_idx) >= cfg.min_points:
                 groups.append((int(cls), object_idx, float(probabilities[object_idx].mean())))
     return groups
@@ -436,12 +513,16 @@ def process_batch(paths, model_path, output_root, cfg, log=print):
             cloud = read_cloud(path, cfg)
             entry["input"] = cloud["info"]
             entry["source_sha256"] = sha256(path)
-            features = extract_features(cloud, cfg.neighbors)
-            proba = model["estimator"].predict_proba(features)
+            log(f"{dataset_id}: {len(cloud['xyz']):,} points")
+            features = extract_features(cloud, cfg.neighbors, log)
+            log(f"{dataset_id}: classifying points")
+            proba = predict(model["estimator"], features)
             winning = proba.argmax(axis=1)
             classes = np.asarray(model["estimator"].classes_)[winning]
             confidence = proba[np.arange(len(features)), winning]
+            log(f"{dataset_id}: grouping points into objects")
             groups = instance_groups(cloud["xyz"], classes, confidence, cfg)
+            log(f"{dataset_id}: writing {len(groups)} objects")
             point_instance = np.zeros(len(features), dtype=np.int32)
             objects, rows = [], []
             for index, (cls, selected, score) in enumerate(groups, 1):

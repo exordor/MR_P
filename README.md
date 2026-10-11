@@ -80,7 +80,7 @@ Processing and CSV export use original points without downsampling. New display 
 
 ## Scope and limits
 
-The default limit is 500,000 points per input file and per labelled split. The settings permit up to 2,000,000, but that scale has not been benchmarked. Oversized inputs fail explicitly. Dense clustering neighbourhoods are also rejected to bound memory usage.
+By default there is no point limit (Max points / file = 0): every point of every file is processed. A positive value restores an explicit per-file and per-labelled-split cap. A file is refused before decoding only if its estimated memory (about 600 bytes per point) exceeds 80% of physical RAM; split such files by area first. Feature extraction, classification and clustering use all CPU cores. Clustering is a chunked DBSCAN whose memory is bounded by chunk size; core points and clusters match scikit-learn's DBSCAN, and each border point joins the cluster of its nearest core point. Measured on a 10-core, 64 GB Mac with a 100-tree random forest: 7.3 M points (Devil's Bridge LAZ) 33 s, 7.5 M points (Barsebäck LAS) under 32 s, 14.7 M points (Saint-Bauzille LAS) 81 s, peak memory 2.7–5.5 GB.
 
 The MLP is a three-hidden-layer network on engineered features (64/64/32), not an end-to-end PointNet or Pointcept model. Local height uses the neighbourhood Z 10th percentile, not a reconstructed seabed. DBSCAN can merge nearby same-class objects or split sparse objects. Each file is clustered globally, avoiding within-file tile seams; overlapping input files are not reconciled with each other.
 

@@ -74,7 +74,7 @@ class App(tk.Tk):
         self.radius = tk.StringVar(value="0.3")
         self.minimum = tk.StringVar(value="10")
         self.neighbors = tk.StringVar(value="20")
-        self.limit = tk.StringVar(value="500000")
+        self.limit = tk.StringVar(value="0")
         self.backend = tk.StringVar(value="random_forest")
         self.iterations = tk.StringVar(value="100")
         self.display_limit = tk.StringVar(value=str(DISPLAY_LIMIT))
@@ -165,7 +165,9 @@ class App(tk.Tk):
         area.grid(row=1, column=7)
         tooltip(area, "unresolved: leave Area blank\nconvex_hull_xy: area of the XY convex hull")
         self.field(settings, "Neighbours", self.neighbors, 2, 0, 8)
-        self.field(settings, "Max points / file", self.limit, 2, 2, 10)
+        limit = self.field(settings, "Max points / file", self.limit, 2, 2, 10)
+        tooltip(limit, "0 = no limit: the whole file is processed.\n"
+                       "Very large files are refused only if they would not fit in memory.")
         self.log_box = tk.Text(self, height=5, state="disabled", wrap="word")
         self.log_box.pack(side="bottom", fill="x", padx=12, before=settings)
         self.progress = ttk.Progressbar(self, mode="indeterminate")
@@ -174,7 +176,9 @@ class App(tk.Tk):
     @staticmethod
     def field(parent, title, variable, row, col, width):
         ttk.Label(parent, text=title).grid(row=row, column=col, sticky="w", padx=4, pady=3)
-        ttk.Entry(parent, textvariable=variable, width=width).grid(row=row, column=col + 1, sticky="w")
+        entry = ttk.Entry(parent, textvariable=variable, width=width)
+        entry.grid(row=row, column=col + 1, sticky="w")
+        return entry
 
     @staticmethod
     def path_row(parent, title, variable, command, row):

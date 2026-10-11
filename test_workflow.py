@@ -8,10 +8,12 @@ from pathlib import Path
 
 import numpy as np
 
-from core import (HEADERS, Settings, display_indices, evaluate_model, extract_features, instance_groups,
+import core
+from core import (HEADERS, Settings, dbscan, display_indices, evaluate_model, extract_features, instance_groups,
                   load_manifest, load_model, make_run_directory, process_batch,
                   projected_area, read_cloud, train_model)
 from create_demo import create_demo
+from sklearn.cluster import DBSCAN
 
 
 class WorkflowTest(unittest.TestCase):
@@ -102,6 +104,27 @@ class WorkflowTest(unittest.TestCase):
             read_cloud(sample, Settings(max_points=100, coordinates_in_meters=True))
         with self.assertRaises(FileExistsError):
             train_model(self.manifest, self.model, self.cfg)
+
+    def test_no_point_limit_by_default_but_memory_guard(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        self.assertEqual(Settings().max_points, 0)
+        self.assertGreater(len(read_cloud(sample, self.cfg)["xyz"]), 0)
+        total = core.physical_memory()
+        if total:
+            with self.assertRaisesRegex(ValueError, "Split the file"):
+                core.check_memory(total // core.BYTES_PER_POINT)
+
+    def test_chunked_dbscan_matches_sklearn_core_clusters(self):
+        rng = np.random.default_rng(0)
+        centres = rng.uniform(0, 20, (40, 3))
+        points = np.concatenate([c + rng.normal(0, 0.25, (300, 3)) for c in centres] +
+                                [rng.uniform(0, 20, (2000, 3))])
+        reference = DBSCAN(eps=0.3, min_samples=10).fit(points)
+        core_idx = reference.core_sample_indices_
+        # Small chunks force clusters to be joined across many chunk boundaries.
+        labels = dbscan(points, 0.3, 10, chunk=500)
+        np.testing.assert_array_equal(labels[core_idx], reference.labels_[core_idx])
+        np.testing.assert_array_equal(labels == -1, reference.labels_ == -1)
 
     def test_scene_and_content_leakage_checks(self):
         source = json.loads(self.manifest.read_text())
