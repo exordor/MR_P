@@ -9,6 +9,7 @@ from pathlib import Path
 
 import laspy
 import numpy as np
+from pyproj import CRS
 
 import core
 from core import (HEADERS, Settings, dbscan, display_indices, evaluate_model, extract_features, inspect_file,
@@ -269,6 +270,97 @@ class WorkflowTest(unittest.TestCase):
         groups = instance_groups(xyz, np.ones(len(xyz), dtype=int), np.ones(len(xyz)), cfg)
         self.assertEqual(len(groups), 1)
         self.assertEqual(len(groups[0][1]), len(xyz))
+
+    def tiling_scene(self):
+        """60 x 40 m riverbed with water surface, grid points (many equal distances), duplicate points and
+        isolated points far from all others, so tiles need wider margins."""
+        rng = np.random.default_rng(7)
+        bed = np.column_stack((rng.uniform(0, 60, 9000), rng.uniform(0, 40, 9000), rng.normal(-3, 0.05, 9000)))
+        grid = np.array([[x, y, -2.5] for x in np.arange(20, 26, 0.1) for y in np.arange(10, 13, 0.1)])
+        surface = np.column_stack((rng.uniform(0, 60, 3000), rng.uniform(0, 40, 3000), np.zeros(3000)))
+        lonely = np.array([[30, 20, 15], [30.5, 20, 15], [59, 1, 9], [1, 39, 12]])
+        plates = np.vstack([rng.uniform([-0.35, -0.3, -0.1], [0.35, 0.3, 0.1], (140, 3)) + [x, y, -2.4]
+                            for x, y in ((8, 8), (30, 20), (45, 30), (15, 33), (52, 12))])
+        xyz = np.vstack((bed, grid, grid[:200], surface, lonely, plates))
+        classes = np.r_[np.full(len(bed), 40), np.full(len(grid) + 200, 1), np.full(len(surface), 41),
+                        np.full(len(lonely) + len(plates), 1)]
+        order = rng.permutation(len(xyz))  # Acquisition order is not spatial.
+        header = laspy.LasHeader(point_format=6, version="1.4")
+        header.scales, header.offsets = [0.001] * 3, [500000, 6000000, 0]
+        header.add_crs(CRS.from_epsg(32632))
+        las = laspy.LasData(header)
+        las.x, las.y, las.z = (xyz[order] + [500000, 6000000, 0]).T
+        las.intensity = rng.integers(100, 3000, len(xyz)).astype(np.uint16)
+        las.classification = classes[order].astype(np.uint8)
+        las.return_number = las.number_of_returns = np.ones(len(xyz), dtype=np.uint8)
+        las.scan_angle = rng.integers(-2000, 2000, len(xyz)).astype(np.int16)
+        path = self.root / "tiling_scene.laz"
+        if not path.exists():
+            las.write(path)
+        return path
+
+    def test_tiled_features_equal_whole_file(self):
+        path = self.tiling_scene()
+        cloud = read_cloud(path, self.cfg)
+        whole = extract_features(cloud)
+        self.assertTrue(cloud["classification"].tolist().count(40) >= 10)
+        saved = core.TILE_POINTS
+        try:
+            core.TILE_POINTS = 1500
+            tiles, origin, grid = core.make_tiles(path, self.root / "tiles_check")
+            self.assertGreater(len(tiles), 5)
+            self.assertEqual(sum(t["count"] for t in tiles), len(whole))
+            self.assertLessEqual(max(t["count"] for t in tiles), 1500 * 2)
+            tiled = np.full_like(whole, np.nan)
+            for number in range(len(tiles)):
+                index, values = core.tile_features(tiles, number, 20, origin, grid)
+                tiled[index] = values
+        finally:
+            core.TILE_POINTS = saved
+            shutil.rmtree(self.root / "tiles_check", ignore_errors=True)
+        np.testing.assert_array_equal(tiled, whole)  # Bit for bit, including bed height and isolated points.
+
+    def test_tiled_run_equals_one_tile_run(self):
+        path = self.tiling_scene()
+        cfg = Settings(**{**self.cfg.__dict__, "threshold": 0.0, "min_points": 3})
+        runs = []
+        saved = core.TILE_POINTS
+        try:
+            for tile_points in (10 ** 9, 1500):
+                core.TILE_POINTS = tile_points
+                runs.append(Path(process_batch([path], self.model, self.root / f"tiled_{tile_points}", cfg,
+                                               log=lambda x: None)) / "datasets" / "D0001")
+        finally:
+            core.TILE_POINTS = saved
+        one, tiled = runs
+        self.assertFalse((tiled / "tiles.tmp").exists())
+        self.assertGreater(len(json.loads((tiled / "objects.json").read_text(encoding="utf-8"))), 0)
+        for name in ("objects.json", "report.csv", "view3d.html"):
+            self.assertEqual((one / name).read_bytes(), (tiled / name).read_bytes(), name)
+        with np.load(one / core.PREDICTIONS) as a, np.load(tiled / core.PREDICTIONS) as b:
+            np.testing.assert_array_equal(a["classes"], b["classes"])
+            np.testing.assert_array_equal(a["confidence"], b["confidence"])
+        self.assertEqual((one / "classified.laz").read_bytes(), (tiled / "classified.laz").read_bytes())
+
+    def test_equally_near_neighbours_do_not_depend_on_point_order(self):
+        xyz = np.array([[x, y, 0.0] for x in np.arange(0, 3, 0.5) for y in np.arange(0, 3, 0.5)])
+        rng = np.random.default_rng(3)
+        cloud = {"xyz": xyz, "intensity": rng.integers(0, 1000, len(xyz)).astype(float),
+                 "return_number": np.ones(len(xyz)), "number_of_returns": np.ones(len(xyz)),
+                 "scan_angle": np.zeros(len(xyz))}
+        order = rng.permutation(len(xyz))
+        shuffled = {k: v[order] for k, v in cloud.items()}
+        shuffled["index"] = order
+        reference = extract_features(cloud, 6)
+        features = extract_features(shuffled, 6, origin=xyz[0])
+        np.testing.assert_array_equal(features, reference[order])
+
+    def test_forest_probabilities_are_reproducible(self):
+        model = load_model(self.model)["estimator"]
+        x = np.random.default_rng(0).normal(size=(200_000, len(core.FEATURES))).astype(np.float32)
+        first = core.predict(model, x)
+        np.testing.assert_array_equal(first, core.predict(model, x))
+        np.testing.assert_array_equal(first[:5000], model.predict_proba(x[:5000]))
 
     def test_features_do_not_depend_on_map_translation(self):
         cloud = read_cloud(self.manifest.parent / "SYNTHETIC_test.laz", self.cfg)

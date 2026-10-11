@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import base64
+import copy
 import csv
 import hashlib
 import json
 import os
 import platform
+import shutil
 import uuid
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -34,8 +36,16 @@ VERSION = "0.1.0-prototype"
 DISPLAY_LIMIT = 30_000
 WEB_LIMIT = 3_000_000  # Points in the browser (WebGL) 3D view.
 WEB_TEMPLATE = Path(__file__).resolve().parent / "viewer3d.html"
-# Measured peak on real YellowScan files is ~330 bytes per point; keep headroom.
+# Measured peak when a whole file is held in memory (training) is ~430 bytes per point; keep headroom.
 BYTES_PER_POINT = 600
+# Processing streams the file and works tile by tile; per-point results stay in memory (~20 bytes per point)
+# and each point is stored once in a temporary tile file next to the results.
+PROCESS_BYTES_PER_POINT = 40
+TILE_POINTS = 1_000_000  # Average points per processing tile; bounds the feature / k-NN memory.
+CHUNK_POINTS = 1_000_000  # Points decoded at a time when streaming a LAS/LAZ (a multiple of the LAZ chunk size).
+TILE_RECORD = np.dtype([("index", "<i8"), ("x", "<f8"), ("y", "<f8"), ("z", "<f8"), ("intensity", "<u2"),
+                        ("return_number", "u1"), ("number_of_returns", "u1"), ("scan_angle", "<f8"),
+                        ("classification", "u1")])
 WORKERS = os.cpu_count() or 1
 HEADERS = ["object ID", "x", "y", "z", "Nr_of_points", "Intensity", "Area", "confidence"]
 FEATURES = ["local_height", "roughness", "linearity", "planarity", "sphericity",
@@ -117,13 +127,26 @@ def physical_memory():
         return None
 
 
-def check_memory(count):
+def check_memory(count, need=None):
     """Refuse early, before decoding, when a file clearly cannot fit in RAM."""
     total = physical_memory()
-    need = count * BYTES_PER_POINT
+    need = count * BYTES_PER_POINT if need is None else need
     if total and need > total * 0.8:
         raise ValueError(f"{count:,} points needs about {need / 1024**3:.1f} GB RAM; this computer has "
                          f"{total / 1024**3:.1f} GB. Split the file (e.g. by area) before processing.")
+
+
+def process_memory(count):
+    """RAM needed to process a file: per-point results plus about two tiles of whole-file working memory."""
+    return count * PROCESS_BYTES_PER_POINT + min(count, 2 * TILE_POINTS) * BYTES_PER_POINT
+
+
+def check_disk(folder, count):
+    free = shutil.disk_usage(folder).free
+    need = count * TILE_RECORD.itemsize
+    if need > free * 0.9:
+        raise ValueError(f"{count:,} points needs about {need / 1024**3:.1f} GB free disk space for temporary "
+                         f"tiles in the results directory; it has {free / 1024**3:.1f} GB")
 
 
 def inspect_file(path):
@@ -155,7 +178,7 @@ def inspect_file(path):
         elif any(abs(a.unit_conversion_factor - 1.0) > 1e-8 for a in crs.axis_info[:2]):
             issues.append("CRS horizontal units are not metres")
     total = physical_memory()
-    need = count * BYTES_PER_POINT
+    need = process_memory(count)
     if total and need > total * 0.8:
         issues.append("too large for this computer's memory: split the file")
     if count < 3:
@@ -167,25 +190,21 @@ def inspect_file(path):
             "fields": sorted(dims), "memory_bytes": need, "ram_bytes": total, "issues": issues}
 
 
-def read_cloud(path, cfg):
+def open_cloud(path, cfg):
+    """Check a LAS/LAZ and the settings from its header alone; returns the input description for the results."""
     validate_settings(cfg)
     path = Path(path)
     if path.suffix.lower() not in (".las", ".laz"):
         raise ValueError("Only LAS / LAZ files are supported")
     with laspy.open(path) as reader:
-        count = reader.header.point_count
-        if count < 3:
-            raise ValueError("Point cloud must contain at least 3 points")
-        if cfg.max_points and count > cfg.max_points:
-            raise ValueError(f"{count:,} points exceeds the Max points / file setting {cfg.max_points:,} "
-                             "(set it to 0 for no limit); no silent downsampling")
-        check_memory(count)
         header = reader.header
-        cloud = reader.read()
-    xyz = np.column_stack((cloud.x, cloud.y, cloud.z)).astype(np.float64)
-    if not np.isfinite(xyz).all():
-        raise ValueError("Non-finite coordinates in input")
-    dims = set(cloud.point_format.dimension_names)
+    count = header.point_count
+    if count < 3:
+        raise ValueError("Point cloud must contain at least 3 points")
+    if cfg.max_points and count > cfg.max_points:
+        raise ValueError(f"{count:,} points exceeds the Max points / file setting {cfg.max_points:,} "
+                         "(set it to 0 for no limit); no silent downsampling")
+    dims = set(header.point_format.dimension_names)
     required = {"intensity", "return_number", "number_of_returns"}
     if not required <= dims:
         raise ValueError(f"Required attributes missing: {required - dims}")
@@ -201,6 +220,8 @@ def read_cloud(path, cfg):
         raise ValueError("CRS missing: specify the known projected CRS (e.g. EPSG:32632)")
     if not cfg.coordinates_in_meters:
         raise ValueError("Confirm that all X/Y/Z coordinates use metres, including Z")
+    if not {"scan_angle", "scan_angle_rank"} & dims:
+        raise ValueError("Scan angle is unavailable")
     if native_crs is None:
         notes.append("CRS supplied by operator; no reprojection performed")
     if cfg.vertical_datum == "unspecified" or not cfg.vertical_datum.strip():
@@ -216,95 +237,196 @@ def read_cloud(path, cfg):
         "used_by_model": False,
     }
     notes.append("Full waveform is not decoded or used; pointer fields do not prove samples are available")
-    intensity = np.asarray(cloud.intensity, dtype=np.float64)
-    if not intensity.any():
-        notes.append("All intensity values are zero; retained as recorded, not assumed calibrated or missing")
+    return {"source": str(path.resolve()), "point_count": count,
+            "las_version": str(header.version), "point_format": header.point_format.id,
+            "crs": selected_crs.to_string(), "crs_wkt": selected_crs.to_wkt(),
+            "units": "metres (operator confirmed)", "vertical_datum": cfg.vertical_datum,
+            "scales": header.scales.tolist(), "offsets": header.offsets.tolist(),
+            "fields": sorted(dims), "waveform": waveform_info, "warnings": notes}
+
+
+def point_columns(points):
+    """The per-point values the model uses, from a whole LAS or one streamed chunk of it."""
+    dims = set(points.point_format.dimension_names)
     if "scan_angle" in dims:
-        angle = np.asarray(cloud.scan_angle, dtype=np.float64) * 0.006
-    elif "scan_angle_rank" in dims:
-        angle = np.asarray(cloud.scan_angle_rank, dtype=np.float64)
+        angle = np.asarray(points.scan_angle, dtype=np.float64) * 0.006
     else:
-        raise ValueError("Scan angle is unavailable")
-    return {
-        "xyz": xyz, "intensity": intensity,
-        "return_number": np.asarray(cloud.return_number, dtype=np.float64),
-        "number_of_returns": np.asarray(cloud.number_of_returns, dtype=np.float64),
-        "scan_angle": angle,
-        "classification": np.asarray(cloud.classification, dtype=np.uint8),
-        "info": {"source": str(path.resolve()), "point_count": len(xyz),
-                 "las_version": str(header.version), "point_format": header.point_format.id,
-                 "crs": selected_crs.to_string(), "crs_wkt": selected_crs.to_wkt(),
-                 "units": "metres (operator confirmed)", "vertical_datum": cfg.vertical_datum,
-                 "scales": header.scales.tolist(), "offsets": header.offsets.tolist(),
-                 "fields": sorted(dims), "waveform": waveform_info, "warnings": notes},
-    }
+        angle = np.asarray(points.scan_angle_rank, dtype=np.float64)
+    xyz = np.column_stack((points.x, points.y, points.z)).astype(np.float64)
+    if not np.isfinite(xyz).all():
+        raise ValueError("Non-finite coordinates in input")
+    return {"xyz": xyz, "intensity": np.asarray(points.intensity, dtype=np.float64),
+            "return_number": np.asarray(points.return_number, dtype=np.float64),
+            "number_of_returns": np.asarray(points.number_of_returns, dtype=np.float64),
+            "scan_angle": angle, "classification": np.asarray(points.classification, dtype=np.uint8)}
 
 
-def bed_height(xyz, classification):
+ZERO_INTENSITY = "All intensity values are zero; retained as recorded, not assumed calibrated or missing"
+
+
+def read_cloud(path, cfg):
+    """Whole file in memory (training and labelling); processing streams the file instead."""
+    info = open_cloud(path, cfg)
+    check_memory(info["point_count"])
+    cloud = point_columns(laspy.read(path).points)
+    if not cloud["intensity"].any():
+        info["warnings"].append(ZERO_INTENSITY)
+    info["point_count"] = len(cloud["xyz"])
+    return {**cloud, "info": info}
+
+
+def stream(path, chunk=CHUNK_POINTS):
+    """Yield (index of first point, points) for successive chunks of a LAS/LAZ, in file order."""
+    with laspy.open(path) as reader:
+        start = 0
+        for points in reader.chunk_iterator(chunk):
+            yield start, points
+            start += len(points)
+
+
+def gather(path, rows, info=None):
+    """Values of the given points (ascending indices), streaming the file so only those points are held.
+
+    Also returns the mean of all coordinates. info, when given, receives the intensity warning.
+    """
+    rows = np.asarray(rows, dtype=np.int64)
+    parts, total, intensity_seen = [], np.zeros(3), False
+    for start, points in stream(path):
+        cloud = point_columns(points)
+        # Row by row, as numpy reduces axis 0, so the mean equals that of the whole array.
+        total = np.add.reduce(np.vstack((total[None], cloud["xyz"])), axis=0)
+        intensity_seen = intensity_seen or bool(cloud["intensity"].any())
+        lo, hi = np.searchsorted(rows, [start, start + len(points)])
+        parts.append({k: v[rows[lo:hi] - start] for k, v in cloud.items()})
+        count = start + len(points)
+    if info is not None and not intensity_seen:
+        info["warnings"].append(ZERO_INTENSITY)
+    values = {k: np.concatenate([part[k] for part in parts]) for k in parts[0]}
+    return values, total / count
+
+
+def bed_grid(xyz, classification):
+    """Origin and shape of the riverbed grid from the bathymetric bottom points (LAS class 40); None if too few."""
+    bed = classification == 40
+    if bed.sum() < 10:
+        return None
+    low = xyz[bed, :2].min(axis=0)
+    return low, np.floor((xyz[bed, :2].max(axis=0) - low) / BED_CELL).astype(np.int64) + 1
+
+
+def bed_height(xyz, classification, grid=None, rows=None):
     """Height of each point above the local bathymetric bottom (LAS class 40) and whether it is known.
 
     Bottom points are binned into BED_CELL cells; each cell's median Z is smoothed by a BED_WINDOW median,
     so a target lying on the bed does not raise the bed estimate beneath itself.
+    grid: from bed_grid (default: of these points; () = no bed). rows: points to return (default all).
+    Only bottom points within BED_WINDOW // 2 cells of a row affect it, so a tile that holds those
+    points gives the whole-file value.
     """
-    bed = classification == 40
-    height, known = np.zeros(len(xyz), dtype=np.float64), np.zeros(len(xyz), dtype=bool)
-    if bed.sum() < 10:
+    rows = np.arange(len(xyz)) if rows is None else rows
+    height, known = np.zeros(len(rows), dtype=np.float64), np.zeros(len(rows), dtype=bool)
+    grid = bed_grid(xyz, classification) if grid is None else grid
+    if not grid:
         return height, known
-    low = xyz[bed, :2].min(axis=0)
-    cell = np.floor((xyz[:, :2] - low) / BED_CELL).astype(np.int64)
-    shape = cell[bed].max(axis=0) + 1
-    order = np.lexsort((xyz[bed, 2], cell[bed, 1], cell[bed, 0]))
-    flat = (cell[bed, 0] * shape[1] + cell[bed, 1])[order]
+    low, shape = grid
+    cell = np.floor((xyz[rows, :2] - low) / BED_CELL).astype(np.int64)
+    inside = (cell >= 0).all(axis=1) & (cell < shape).all(axis=1)
+    bed = classification == 40
+    bed_cell = np.floor((xyz[bed, :2] - low) / BED_CELL).astype(np.int64)
+    if not inside.any() or not len(bed_cell):
+        return height, known
+    # Grid over just these cells; cells outside it hold no bottom point, as do the (NaN) cells around it.
+    first = np.minimum(bed_cell.min(axis=0), cell[inside].min(axis=0))
+    size = np.maximum(bed_cell.max(axis=0), cell[inside].max(axis=0)) - first + 1
+    bed_cell -= first
+    order = np.lexsort((xyz[bed, 2], bed_cell[:, 1], bed_cell[:, 0]))
+    flat = (bed_cell[:, 0] * size[1] + bed_cell[:, 1])[order]
     z = xyz[bed, 2][order]
     starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
     counts = np.diff(np.r_[starts, len(flat)])
-    grid = np.full(shape[0] * shape[1], np.nan)
-    grid[flat[starts]] = z[starts + counts // 2]  # Z is sorted within each cell: middle value is the median.
-    grid = grid.reshape(shape)
-    smooth = generic_filter(grid, lambda v: np.nan if np.isnan(v).all() else np.nanmedian(v),
+    surface_grid = np.full(size[0] * size[1], np.nan)
+    surface_grid[flat[starts]] = z[starts + counts // 2]  # Z is sorted within each cell: middle value is the median.
+    smooth = generic_filter(surface_grid.reshape(size), lambda v: np.nan if np.isnan(v).all() else np.nanmedian(v),
                             size=BED_WINDOW, mode="constant", cval=np.nan)
-    inside = (cell >= 0).all(axis=1) & (cell[:, 0] < shape[0]) & (cell[:, 1] < shape[1])
-    surface = np.full(len(xyz), np.nan)
-    surface[inside] = smooth[cell[inside, 0], cell[inside, 1]]
+    surface = np.full(len(rows), np.nan)
+    surface[inside] = smooth[cell[inside, 0] - first[0], cell[inside, 1] - first[1]]
     known = np.isfinite(surface)
-    height[known] = xyz[known, 2] - surface[known]
+    height[known] = xyz[rows[known], 2] - surface[known]
     return np.clip(height, -5, 5), known
 
 
-def extract_features(cloud, neighbors=20, log=None):
-    """Full resolution; chunks bound the N*k temporaries and run on all CPU cores."""
+def neighbours(tree, local, rows, k, number):
+    """Distances and indices of each row's k nearest points, ordered by distance, then by point number.
+
+    Equal distances are common (coordinates are stored in millimetres), and a k-d tree may return either of
+    two equally near points. Choosing by point number makes the result independent of the tree, so a tile
+    gives the same neighbours as the whole file. number: original point number of every point in the tree.
+    """
+    more = k < len(local)
+    distances, idx = tree.query(local[rows], k=k + more, workers=1)
+    if more:  # A tie at the k-th distance: take the lowest numbers among all points at that distance.
+        for row in np.flatnonzero(distances[:, k] == distances[:, k - 1]):
+            limit, wanted = distances[row, k - 1], 2 * k
+            while True:
+                near, ids = tree.query(local[rows[row]], k=min(wanted, len(local)))
+                if near[-1] > limit or wanted >= len(local):
+                    break
+                wanted *= 2
+            ids = ids[near <= limit]
+            near = near[near <= limit]
+            choose = np.lexsort((number[ids], near))[:k]
+            distances[row, :k], idx[row, :k] = near[choose], ids[choose]
+        distances, idx = distances[:, :k], idx[:, :k]
+    tied = np.flatnonzero((distances[:, 1:] == distances[:, :-1]).any(axis=1))  # Order equal ones by number too.
+    if len(tied):
+        order = np.lexsort((number[idx[tied]], distances[tied]), axis=1)
+        distances[tied] = np.take_along_axis(distances[tied], order, axis=1)
+        idx[tied] = np.take_along_axis(idx[tied], order, axis=1)
+    return distances, idx
+
+
+def extract_features(cloud, neighbors=20, log=None, rows=None, origin=None, bed=None, k=None):
+    """Full resolution; chunks bound the N*k temporaries and run on all CPU cores.
+
+    rows: points to describe (default all); every point of cloud can be their neighbour. origin: of the
+    local frame (default the first point); bed: see bed_height; k: neighbours (default neighbors, at most
+    the point count). A tile given the same origin, grid and k gives the whole-file values for its rows.
+    """
     xyz = cloud["xyz"]
+    rows = np.arange(len(xyz)) if rows is None else np.asarray(rows)
     classification = cloud.get("classification", np.zeros(len(xyz), dtype=np.uint8))
-    above_bed, bed_known = bed_height(xyz, classification)
-    local = xyz - xyz[0]
+    above_bed, bed_known = bed_height(xyz, classification, bed, rows)
+    local = xyz - (xyz[0] if origin is None else origin)
     tree = cKDTree(local)
-    k = min(neighbors, len(xyz))
-    features = np.empty((len(xyz), len(FEATURES)), dtype=np.float32)
+    k = min(neighbors, len(xyz)) if k is None else k
+    number = cloud.get("index", np.arange(len(xyz)))
+    features = np.empty((len(rows), len(FEATURES)), dtype=np.float32)
     rn, nr = cloud["return_number"], cloud["number_of_returns"]
 
     def chunk(start):
-        stop = min(start + 8192, len(xyz))
-        distances, idx = tree.query(local[start:stop], k=k, workers=1)
+        stop = min(start + 8192, len(rows))
+        own = rows[start:stop]
+        distances, idx = neighbours(tree, local, own, k, number)
         points = local[idx]
         centered = points - points.mean(axis=1, keepdims=True)
         covariance = np.einsum("nki,nkj->nij", centered, centered) / k
         eigen = np.maximum(np.linalg.eigvalsh(covariance), 0)
         largest = np.maximum(eigen[:, 2], 1e-12)
-        heights = local[start:stop, 2] - np.quantile(points[:, :, 2], 0.1, axis=1)
+        heights = local[own, 2] - np.quantile(points[:, :, 2], 0.1, axis=1)
         values = cloud["intensity"][idx]
-        relative = (cloud["intensity"][start:stop] - np.median(values, axis=1)) / (values.std(axis=1) + 1)
-        r, n = rn[start:stop], nr[start:stop]
+        relative = (cloud["intensity"][own] - np.median(values, axis=1)) / (values.std(axis=1) + 1)
+        r, n = rn[own], nr[own]
         invalid = (n < 1) | (r < 1) | (r > n)
         features[start:stop] = np.column_stack((
             heights, np.sqrt(eigen[:, 0]), (eigen[:, 2] - eigen[:, 1]) / largest,
             (eigen[:, 1] - eigen[:, 0]) / largest, eigen[:, 0] / largest,
-            distances[:, -1], relative, cloud["intensity"][start:stop] / 65535,
+            distances[:, -1], relative, cloud["intensity"][own] / 65535,
             np.where(invalid, 0, (r - 1) / np.maximum(n - 1, 1)),
             (~invalid & (n > 1)), (~invalid & (r == n)),
-            cloud["scan_angle"][start:stop] / 90, invalid,
-            above_bed[start:stop], bed_known[start:stop], *class_flags(classification[start:stop]),
+            cloud["scan_angle"][own] / 90, invalid,
+            above_bed[start:stop], bed_known[start:stop], *class_flags(classification[own]),
         ))
-    starts = range(0, len(xyz), 8192)
+    starts = range(0, len(rows), 8192)
     # Threads share the arrays; numpy/scipy release the GIL, and slices are disjoint.
     with ThreadPoolExecutor(WORKERS) as pool:
         for done, _ in enumerate(pool.map(chunk, starts), 1):
@@ -318,6 +440,170 @@ def extract_features(cloud, neighbors=20, log=None):
 def class_flags(codes):
     """Vendor LAS classes the model can use: bottom, water surface, water column, ground, noise."""
     return (codes == 40, np.isin(codes, (9, 41, 42)), codes == 45, codes == 2, np.isin(codes, (7, 18)))
+
+
+TILE_MARGIN = 5.0  # metres read around a tile's points at first; more than the riverbed window (3 m).
+
+
+def tile_layout(counts):
+    """Split a grid of point counts into rectangles of at most TILE_POINTS points (or single cells).
+
+    Each split is across the longer side, where the points divide in half, so tiles follow the data,
+    not the (often mostly empty) bounding box. Returns the tile number of every cell, -1 for empty ones.
+    """
+    label = np.full(counts.shape, -1, dtype=np.int64)
+    pending, number = [(0, counts.shape[0], 0, counts.shape[1])], 0
+    while pending:
+        x0, x1, y0, y1 = pending.pop()
+        block = counts[x0:x1, y0:y1]
+        total = block.sum()
+        if not total:
+            continue
+        if total <= TILE_POINTS or block.size == 1:
+            label[x0:x1, y0:y1] = number
+            number += 1
+            continue
+        axis = 0 if x1 - x0 >= y1 - y0 else 1
+        cut = int(np.searchsorted(np.cumsum(block.sum(axis=1 - axis)), total / 2)) + 1
+        cut = min(max(cut, 1), block.shape[axis] - 1)
+        if axis == 0:
+            pending += [(x0, x0 + cut, y0, y1), (x0 + cut, x1, y0, y1)]
+        else:
+            pending += [(x0, x1, y0, y0 + cut), (x0, x1, y0 + cut, y1)]
+    return label
+
+
+def make_tiles(path, folder):
+    """Stream a LAS/LAZ into spatial tiles of at most about TILE_POINTS points, stored in folder.
+
+    A first pass counts points on a fine grid to lay out the tiles; a second writes each point to its tile.
+    Returns the tiles (file, point count, XY bounds), the first point (origin of the local frame) and the
+    riverbed grid of the whole file, so tiles are described exactly as the whole file would be.
+    """
+    folder = Path(folder)
+    folder.mkdir()
+    with laspy.open(path) as reader:
+        count, low, high = reader.header.point_count, reader.header.mins[:2], reader.header.maxs[:2]
+    extent = np.maximum(high - low, 1e-9)
+    # About 16 grid cells per tile if points were spread evenly over the bounding box.
+    side = max(np.sqrt(extent.prod() * TILE_POINTS / count) / 4, TILE_MARGIN)
+    shape = np.ceil(extent / side).astype(np.int64) + 1
+
+    def cells(x, y):  # Header bounds only place the grid; points outside them go to the edge cells.
+        cell = np.floor((np.column_stack((x, y)) - low) / side).astype(np.int64)
+        cell = np.clip(cell, 0, shape - 1)
+        return cell[:, 0] * shape[1] + cell[:, 1]
+    if count <= TILE_POINTS:
+        label = np.zeros(shape.prod(), dtype=np.int64)
+    else:
+        counts = np.zeros(shape.prod(), dtype=np.int64)
+        for _, points in stream(path):
+            counts += np.bincount(cells(points.x, points.y), minlength=len(counts))
+        label = tile_layout(counts.reshape(shape)).ravel()
+    tiles = {}
+    origin, bed_count, bed_low, bed_high = None, 0, np.full(2, np.inf), np.full(2, -np.inf)
+    for start, points in stream(path):
+        cloud = point_columns(points)
+        xyz = cloud["xyz"]
+        origin = xyz[0] if origin is None else origin
+        bed = cloud["classification"] == 40
+        if bed.any():
+            bed_count += int(bed.sum())
+            bed_low = np.minimum(bed_low, xyz[bed, :2].min(axis=0))
+            bed_high = np.maximum(bed_high, xyz[bed, :2].max(axis=0))
+        records = np.empty(len(xyz), dtype=TILE_RECORD)
+        records["index"] = np.arange(start, start + len(xyz))
+        records["x"], records["y"], records["z"] = xyz.T
+        for name in ("intensity", "return_number", "number_of_returns", "scan_angle", "classification"):
+            records[name] = cloud[name]
+        tile = label[cells(xyz[:, 0], xyz[:, 1])]
+        order = np.argsort(tile, kind="stable")
+        ids, first = np.unique(tile[order], return_index=True)
+        for number, part in zip(ids, np.split(records[order], first[1:])):
+            entry = tiles.setdefault(int(number), {"path": folder / f"{number}.bin", "count": 0,
+                                                   "low": np.full(2, np.inf), "high": np.full(2, -np.inf)})
+            with entry["path"].open("ab") as stream_out:
+                part.tofile(stream_out)
+            entry["count"] += len(part)
+            entry["low"] = np.minimum(entry["low"], (part["x"].min(), part["y"].min()))
+            entry["high"] = np.maximum(entry["high"], (part["x"].max(), part["y"].max()))
+    grid = (bed_low, np.floor((bed_high - bed_low) / BED_CELL).astype(np.int64) + 1) if bed_count >= 10 else ()
+    return [tiles[number] for number in sorted(tiles)], origin, grid
+
+
+def tile_cloud(records):
+    return {"xyz": np.column_stack((records["x"], records["y"], records["z"])), "index": records["index"],
+            "intensity": records["intensity"].astype(np.float64),
+            "return_number": records["return_number"].astype(np.float64),
+            "number_of_returns": records["number_of_returns"].astype(np.float64),
+            "scan_angle": records["scan_angle"], "classification": records["classification"]}
+
+
+def tile_features(tiles, number, neighbors, origin, grid, log=None):
+    """Features of one tile's points, equal to those computed over the whole file.
+
+    Points of all tiles within a margin around the tile are read as neighbours. A point whose k-th
+    neighbour is farther than the margin might have a nearer one outside it, so it is done again with a
+    four times wider margin, until every point is certain (or the whole file has been read).
+    """
+    total = sum(tile["count"] for tile in tiles)
+    k = min(neighbors, total)
+    own = np.fromfile(tiles[number]["path"], dtype=TILE_RECORD)
+    features = np.empty((len(own), len(FEATURES)), dtype=np.float32)
+    todo, reach = np.arange(len(own)), TILE_MARGIN
+    while len(todo):
+        low = np.array((own["x"][todo].min(), own["y"][todo].min())) - reach
+        high = np.array((own["x"][todo].max(), own["y"][todo].max())) + reach
+        parts = [own[todo]]
+        for index, tile in enumerate(tiles):
+            if (tile["high"] < low).any() or (tile["low"] > high).any():
+                continue
+            records = own if index == number else np.fromfile(tile["path"], dtype=TILE_RECORD)
+            near = ((records["x"] >= low[0]) & (records["x"] <= high[0]) &
+                    (records["y"] >= low[1]) & (records["y"] <= high[1]))
+            if index == number:
+                near[todo] = False
+            parts.append(records[near])
+        context = np.concatenate(parts)
+        everything = len(context) == total
+        if len(context) >= k:
+            values = extract_features(tile_cloud(context), neighbors, rows=np.arange(len(todo)), origin=origin,
+                                      bed=grid, k=k)
+            # Every point outside the read area is more than reach away in XY alone.
+            certain = np.full(len(todo), True) if everything else values[:, FEATURES.index("radius")] < reach * 0.999
+            features[todo[certain]] = values[certain]
+            todo = todo[~certain]
+        if len(todo) and log:
+            log(f"  {len(todo):,} sparse points: reading {reach * 4:g} m around them")
+        reach *= 4
+    return own["index"], features
+
+
+def classify_tiles(path, count, estimator, neighbors, folder, log=None, stage=None):
+    """Winning class and its probability for every point, computed tile by tile from a temporary tile store."""
+    classes = np.zeros(count, dtype=np.uint8)
+    confidence = np.zeros(count, dtype=np.float32)
+    try:
+        tiles, origin, grid = make_tiles(path, folder)
+        if log:
+            log(f"  {len(tiles)} tile(s)")
+
+        def one(number):
+            index, features = tile_features(tiles, number, neighbors, origin, grid, log)
+            proba = predict(estimator, features)
+            winning = proba.argmax(axis=1)
+            return index, np.asarray(estimator.classes_)[winning], proba[np.arange(len(features)), winning]
+        # Two tiles at a time, so one tile's serial steps (reading, k-d tree) overlap the other's parallel ones.
+        with ThreadPoolExecutor(2) as pool:
+            for number, (index, winners, scores) in enumerate(pool.map(one, range(len(tiles))), 1):
+                classes[index], confidence[index] = winners, scores
+                if stage:
+                    stage("classifying", number / len(tiles))
+                if log and len(tiles) > 1:
+                    log(f"  tile {number} / {len(tiles)} done")
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    return classes, confidence
 
 
 def label_template(path, output, cfg):
@@ -503,7 +789,7 @@ def train_model(manifest_path, output_path, cfg, backend="random_forest", iterat
     for message in training_warnings:
         log(message)
     xv, yv = collect(manifest["datasets"], "validation", cfg, manifest["classes"], log)
-    validation = metrics(yv, estimator.predict(xv), manifest["classes"])
+    validation = metrics(yv, predict_classes(estimator, xv), manifest["classes"])
     # Preserve provenance and add relocatable references for a model/data folder.
     for record in manifest["datasets"]:
         for key in ("path", "labels"):
@@ -546,7 +832,7 @@ def evaluate_model(model_path, output_path, cfg, log=print):
         if record["split"] == "test" and sha256(record["path"]) != record["sha256"]:
             raise ValueError("Test file changed since split registration")
     x, y = collect(model["datasets"], "test", cfg, model["classes"], log)
-    result = metrics(y, model["estimator"].predict(x), model["classes"])
+    result = metrics(y, predict_classes(model["estimator"], x), model["classes"])
     result["model_id"] = model["model_id"]
     write_json(output_path, result)
     return str(output_path)
@@ -566,12 +852,22 @@ def make_run_directory(first_path, output_root):
     raise FileExistsError("Too many duplicate run directories")
 
 
-def predict(estimator, features):
-    """Class probabilities in bounded batches, using all cores for random forests."""
+def predict(estimator, features, batch=65536):
+    """Class probabilities, batches of rows in parallel on all cores.
+
+    Each batch runs on one thread, so a forest adds its trees' votes in a fixed order. With threads inside a
+    batch the order varies, and a point whose two best classes are almost equal could change class between runs.
+    """
     if hasattr(estimator, "n_jobs"):
-        estimator.n_jobs = WORKERS
-    return np.concatenate([estimator.predict_proba(features[a:a + 1_000_000])
-                           for a in range(0, len(features), 1_000_000)])
+        estimator.n_jobs = 1
+    starts = range(0, len(features), batch)
+    with ThreadPoolExecutor(WORKERS) as pool:
+        parts = list(pool.map(lambda a: estimator.predict_proba(features[a:a + batch]), starts))
+    return np.concatenate(parts) if parts else np.empty((0, len(estimator.classes_)))
+
+
+def predict_classes(estimator, features):
+    return np.asarray(estimator.classes_)[predict(estimator, features).argmax(axis=1)]
 
 
 def dbscan(points, eps, min_points, chunk=32768):
@@ -866,62 +1162,75 @@ def write_classified(source, dest, groups, point_instance, las_output="same as i
         raise FileExistsError("Classified output must be a new file, separate from its source")
     if las_output not in LAS_OUTPUTS:
         raise ValueError("Unsupported classified LAS version")
-    las = laspy.read(source)
-    count = len(las.points)
-    point_instance = np.asarray(point_instance)
-    if (point_instance.shape != (count,) or point_instance.dtype.kind not in "iu" or
-            np.any(point_instance < 0) or np.any(point_instance > np.iinfo(np.uint32).max)):
-        raise ValueError("object_instance must contain one uint32-compatible integer per source point")
-    predicted = np.zeros(count, dtype=np.uint8)
-    expected = np.zeros(count, dtype=np.uint32)
-    for number, (cls, selected, _) in enumerate(groups, 1):
-        if not isinstance(cls, (int, np.integer)):
-            raise ValueError("Target class must be an integer")
-        check_target_code(cls)
-        selected = np.asarray(selected)
-        if (selected.ndim != 1 or selected.dtype.kind not in "iu" or
-                np.any(selected < 0) or np.any(selected >= count) or len(np.unique(selected)) != len(selected)):
-            raise ValueError("Object point indices are invalid, repeated or out of range")
-        if np.any(expected[selected]):
-            raise ValueError("Exported objects have overlapping points")
-        expected[selected] = number
-        predicted[selected] = cls
-    if not np.array_equal(expected, point_instance):
-        raise ValueError("object_instance does not match exported object groups")
-    if las_output == "1.4" and las.header.point_format.id < 6:
-        crs = las.header.parse_crs()
-        las = laspy.convert(las, point_format_id=POINT_FORMAT_WITH_FULL_CLASS[las.header.point_format.id],
-                            file_version="1.4")
-        if crs is not None:  # Formats 6-10 must store the CRS as WKT.
-            las.header.add_crs(crs)
-    full = las.header.point_format.id >= 6
-    codes = np.asarray(las.classification, dtype=np.uint8).copy()
-    in_extra_field = False
-    for cls, selected, _ in groups:
-        if full or cls <= 31:
-            codes[selected] = cls
+    with laspy.open(source) as reader:
+        header = copy.deepcopy(reader.header)
+        count = header.point_count
+        point_instance = np.asarray(point_instance)
+        if (point_instance.shape != (count,) or point_instance.dtype.kind not in "iu" or
+                np.any(point_instance < 0) or np.any(point_instance > np.iinfo(np.uint32).max)):
+            raise ValueError("object_instance must contain one uint32-compatible integer per source point")
+        predicted = np.zeros(count, dtype=np.uint8)
+        expected = np.zeros(count, dtype=np.uint32)
+        for number, (cls, selected, _) in enumerate(groups, 1):
+            if not isinstance(cls, (int, np.integer)):
+                raise ValueError("Target class must be an integer")
+            check_target_code(cls)
+            selected = np.asarray(selected)
+            if (selected.ndim != 1 or selected.dtype.kind not in "iu" or
+                    np.any(selected < 0) or np.any(selected >= count) or len(np.unique(selected)) != len(selected)):
+                raise ValueError("Object point indices are invalid, repeated or out of range")
+            if np.any(expected[selected]):
+                raise ValueError("Exported objects have overlapping points")
+            expected[selected] = number
+            predicted[selected] = cls
+        if not np.array_equal(expected, point_instance):
+            raise ValueError("object_instance does not match exported object groups")
+        if las_output == "1.4" and header.point_format.id < 6:  # As laspy.convert, without loading the points.
+            crs = header.parse_crs()
+            point_format = laspy.PointFormat(POINT_FORMAT_WITH_FULL_CLASS[header.point_format.id])
+            point_format.dimensions.extend(header.point_format.extra_dimensions)
+            header.set_version_and_point_format(laspy.header.Version.from_str("1.4"), point_format)
+            if crs is not None:  # Formats 6-10 must store the CRS as WKT.
+                header.add_crs(crs)
+        full = header.point_format.id >= 6
+        in_extra_field = any(not full and cls > 31 for cls, _, _ in groups)
+        in_class_field = (predicted > 0) & (full | (predicted <= 31))
+        for name, dtype, description in (
+                ("object_instance", np.uint32, "Detected object number, 0 = none"),
+                ("object_class", np.uint8, "Predicted target class, 0 = none")):
+            if name in set(header.point_format.dimension_names):
+                dimension = header.point_format.dimension_by_name(name)
+                if dimension.dtype != np.dtype(dtype) or dimension.scales is not None or dimension.offsets is not None:
+                    raise ValueError(f"Existing {name} field has an incompatible type or scaling")
+            else:
+                header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=dtype, description=description))
+        if header.version.minor >= 4:  # As LasData.update_header does before writing.
+            header.start_of_waveform_data_packet_record = 0
+            header.number_of_evlrs = len(header.evlrs) if header.evlrs is not None else 0
         else:
-            in_extra_field = True
-    las.classification = codes
-    for name, dtype, description in (
-            ("object_instance", np.uint32, "Detected object number, 0 = none"),
-            ("object_class", np.uint8, "Predicted target class, 0 = none")):
-        if name in set(las.point_format.dimension_names):
-            dimension = las.point_format.dimension_by_name(name)
-            if dimension.dtype != np.dtype(dtype) or dimension.scales is not None or dimension.offsets is not None:
-                raise ValueError(f"Existing {name} field has an incompatible type or scaling")
-        else:
-            las.add_extra_dim(laspy.ExtraBytesParams(name=name, type=dtype, description=description))
-    las.object_instance = point_instance.astype(np.uint32)
-    las.object_class = predicted
-    las.write(dest)
-    return {"file": Path(dest).name, "las_version": str(las.header.version),
-            "point_format": las.header.point_format.id,
+            header.number_of_evlrs = 0
+        # Chunk by chunk, so memory does not grow with the file.
+        with laspy.open(dest, mode="w", header=header) as writer:
+            start = 0
+            for points in reader.chunk_iterator(CHUNK_POINTS):
+                stop = start + len(points)
+                out = laspy.PackedPointRecord.from_point_record(points, header.point_format)
+                codes = np.asarray(points.classification, dtype=np.uint8).copy()
+                codes[in_class_field[start:stop]] = predicted[start:stop][in_class_field[start:stop]]
+                out["classification"] = codes
+                out["object_instance"] = point_instance[start:stop].astype(np.uint32)
+                out["object_class"] = predicted[start:stop]
+                writer.write_points(out)
+                start = stop
+            if header.version.minor >= 4 and header.evlrs:
+                writer.write_evlrs(header.evlrs)
+    return {"file": Path(dest).name, "las_version": str(header.version),
+            "point_format": header.point_format.id,
             "target_codes_in": "object_class" if in_extra_field else "classification"}
 
 
 # Rough share of a file's processing time per stage, for the progress bar.
-STAGES = {"reading": 0.0, "features": 0.15, "classifying": 0.65, "grouping": 0.85, "writing": 0.95}
+STAGES = {"reading": 0.0, "classifying": 0.1, "grouping": 0.85, "writing": 0.9, "done": 1.0}
 
 
 PREDICTIONS = "predictions.npz"  # Per-point class and confidence of a run, so it can be regrouped.
@@ -938,14 +1247,11 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
     info = {"model_id": model["model_id"], "model_path": str(Path(model_path).resolve()),
             "model_sha256": sha256(model_path), "backend": model["backend"], "classes": model["classes"]}
 
-    def classify(index, path, cloud, stage):
-        stage("features")
-        features = extract_features(cloud, cfg.neighbors, log)
-        stage("classifying")
+    def classify(index, path, info, stage, folder):
+        check_disk(folder, info["point_count"])
         log(f"{Path(path).name}: classifying points")
-        proba = predict(model["estimator"], features)
-        winning = proba.argmax(axis=1)
-        return np.asarray(model["estimator"].classes_)[winning], proba[np.arange(len(features)), winning]
+        return classify_tiles(path, info["point_count"], model["estimator"], cfg.neighbors, folder / "tiles.tmp",
+                              log, stage)
     return run_batch(paths, output_root, cfg, info, classify, log, progress)
 
 
@@ -965,21 +1271,22 @@ def regroup_run(run_path, output_root, cfg, log=print, progress=None):
     info = {k: previous[k] for k in ("model_id", "model_path", "model_sha256", "backend", "classes")}
     info["regrouped_from"] = str(run_path.resolve())
 
-    def classify(index, path, cloud, stage):
+    def classify(index, path, info, stage, folder):
         stage("classifying")
         folder, digest = run_path / entries[index]["result_path"], entries[index]["source_sha256"]
         if sha256(path) != digest:
             raise ValueError("Input file changed since the previous run; process it again")
         with np.load(folder / PREDICTIONS, allow_pickle=False) as data:
             classes, confidence = data["classes"], data["confidence"]
-        if len(classes) != len(cloud["xyz"]):
+        if len(classes) != info["point_count"]:
             raise ValueError("Saved predictions do not match the input point count")
         return classes, confidence
     return run_batch([e["source"] for e in entries], output_root, cfg, info, classify, log, progress)
 
 
 def run_batch(paths, output_root, cfg, info, classify, log, progress):
-    """Shared by processing and regrouping. classify(index, path, cloud, stage) gives per-point class and confidence."""
+    """Shared by processing and regrouping. classify(index, path, info, stage, folder) gives per-point class and
+    confidence. Files are streamed, never held whole: memory grows by about PROCESS_BYTES_PER_POINT per point."""
     run = make_run_directory(paths[0], output_root)
     (run / "objects").mkdir()
     (run / "datasets").mkdir()
@@ -992,6 +1299,8 @@ def run_batch(paths, output_root, cfg, info, classify, log, progress):
                    "confidence": "mean winning-class point probability over final exported instance; uncalibrated",
                    "missing_value": "empty CSV cell / null JSON", "downsampling": "none for processing/export",
                    "instance_method": "per-class global DBSCAN within each dataset; separate files are not merged",
+                   "processing": "file streamed in chunks; features per spatial tile, reading neighbours across tile "
+                                 "edges until each point's are certain, so values equal whole-file processing",
                    "classified_laz": "input copy; detected target points get their target LAS class, others keep the input class"},
                "platform": platform.platform(), "datasets": []}
     write_json(run / "run_metadata.json", summary)
@@ -1004,34 +1313,42 @@ def run_batch(paths, output_root, cfg, info, classify, log, progress):
         summary["datasets"].append(entry)
         log(f"{dataset_id}: {Path(path).name}")
 
-        def stage(name):
+        def stage(name, part=0.0):
+            """part: share of this stage already done, moving the bar toward the next stage."""
             if progress:
-                progress(number, len(paths), Path(path).name, name, (number - 1 + STAGES[name]) / len(paths))
+                names = list(STAGES)
+                share = STAGES[name] + part * (STAGES[names[names.index(name) + 1]] - STAGES[name])
+                progress(number, len(paths), Path(path).name, name, (number - 1 + share) / len(paths))
         exported = []
         try:
             stage("reading")
-            cloud = read_cloud(path, cfg)
-            entry["input"] = cloud["info"]
+            entry["input"] = source = open_cloud(path, cfg)
+            check_memory(source["point_count"], process_memory(source["point_count"]))
             entry["source_sha256"] = sha256(path)
-            log(f"{dataset_id}: {len(cloud['xyz']):,} points")
-            classes, confidence = classify(number - 1, path, cloud, stage)
+            log(f"{dataset_id}: {source['point_count']:,} points")
+            classes, confidence = classify(number - 1, path, source, stage, folder)
             # Stored types are used here too, so regrouping with the same settings gives the same objects.
             classes, confidence = classes.astype(np.uint8), confidence.astype(np.float32)
             np.savez_compressed(folder / PREDICTIONS, classes=classes, confidence=confidence)
             stage("grouping")
             log(f"{dataset_id}: grouping points into objects")
-            groups = instance_groups(cloud["xyz"], classes, confidence, cfg)
+            # Only candidate target points are read back and clustered, over the whole file at once, so an
+            # object is never cut at a tile edge.
+            candidates = np.flatnonzero((classes != NOT_TARGET) & (confidence >= cfg.threshold))
+            found, origin = gather(path, candidates, source)
+            local_groups = instance_groups(found["xyz"], classes[candidates], confidence[candidates], cfg)
+            groups = [(cls, candidates[selected], score) for cls, selected, score in local_groups]
             stage("writing")
             log(f"{dataset_id}: writing {len(groups)} objects")
             point_instance = np.zeros(len(classes), dtype=np.int32)
             objects, rows = [], []
-            for index, (cls, selected, score) in enumerate(groups, 1):
+            for index, ((cls, selected, score), (_, own, _)) in enumerate(zip(groups, local_groups), 1):
                 object_id = f"{dataset_id}_O{index:05d}"
-                points = cloud["xyz"][selected]
+                points = found["xyz"][own]
                 point_instance[selected] = index
                 center = points.mean(axis=0)
                 area = projected_area(points, cfg.area_method)
-                intensity = float(cloud["intensity"][selected].mean())
+                intensity = float(found["intensity"][own].mean())
                 dest = run / "objects" / f"{object_id}.csv"
                 exported.append(dest)
                 with dest.open("x", newline="", encoding="utf-8-sig") as stream:
@@ -1060,10 +1377,11 @@ def run_batch(paths, output_root, cfg, info, classify, log, progress):
                 log(f"{dataset_id}: ground truth: {summary_truth['true_positives']}/{len(targets)} targets found, "
                     f"{summary_truth['false_positives']} false alarms")
             web = web_indices(point_instance, keep=None if truth_status is None else truth_status > 0)
-            write_web_view(folder / "view3d.html", Path(path).name, cloud["xyz"][web], point_instance[web],
-                           objects, cloud["xyz"].mean(axis=0), len(classes), classes[web], info["classes"],
-                           cloud["intensity"][web], cloud["classification"][web],
-                           LAS_CLASSES if cloud["info"]["point_format"] >= 6 else LAS12_CLASSES,
+            shown, _ = gather(path, web)
+            write_web_view(folder / "view3d.html", Path(path).name, shown["xyz"], point_instance[web],
+                           objects, origin, len(classes), classes[web], info["classes"],
+                           shown["intensity"], shown["classification"],
+                           LAS_CLASSES if source["point_format"] >= 6 else LAS12_CLASSES,
                            None if truth_status is None else truth_status[web], targets)
             entry["display"] = {"source_points": len(classes), "shown_points": len(web), "limit": WEB_LIMIT,
                                 "page": "view3d.html", "method": "object points first, then random background"}
@@ -1076,6 +1394,7 @@ def run_batch(paths, output_root, cfg, info, classify, log, progress):
                 dest.unlink(missing_ok=True)
             for filename in ("report.csv", "view3d.html", "objects.json", "classified.laz", "evaluation.json", PREDICTIONS):
                 (folder / filename).unlink(missing_ok=True)
+            shutil.rmtree(folder / "tiles.tmp", ignore_errors=True)
             entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
             log(f"{dataset_id}: FAILED: {exc}")
         write_json(folder / "status.json", entry)
