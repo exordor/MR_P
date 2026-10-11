@@ -489,7 +489,7 @@ def train_model(manifest_path, output_path, cfg, backend="random_forest", iterat
     if backend == "random_forest":
         estimator = RandomForestClassifier(n_estimators=iterations,
                                            class_weight="balanced" if manifest["balance_classes"] else None,
-                                           min_samples_leaf=2, max_depth=24, random_state=42, n_jobs=2)
+                                           min_samples_leaf=2, max_depth=24, random_state=42, n_jobs=WORKERS)
     elif backend == "mlp":
         estimator = make_pipeline(StandardScaler(), MLPClassifier(
             hidden_layer_sizes=(64, 64, 32), max_iter=iterations, random_state=42,
@@ -924,6 +924,10 @@ def write_classified(source, dest, groups, point_instance, las_output="same as i
 STAGES = {"reading": 0.0, "features": 0.15, "classifying": 0.65, "grouping": 0.85, "writing": 0.95}
 
 
+PREDICTIONS = "predictions.npz"  # Per-point class and confidence of a run, so it can be regrouped.
+REGROUP_SETTINGS = ("threshold", "cluster_eps", "min_points", "area_method", "las_output")
+
+
 def process_batch(paths, model_path, output_root, cfg, log=print, progress=None):
     """progress(file_number, file_count, name, stage, fraction_of_batch) is called as work advances."""
     validate_settings(cfg)
@@ -931,14 +935,57 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
         raise ValueError("Select at least one LAS / LAZ")
     model = load_model(model_path)
     cfg = Settings(**{**asdict(cfg), "neighbors": model["neighbors"]})
+    info = {"model_id": model["model_id"], "model_path": str(Path(model_path).resolve()),
+            "model_sha256": sha256(model_path), "backend": model["backend"], "classes": model["classes"]}
+
+    def classify(index, path, cloud, stage):
+        stage("features")
+        features = extract_features(cloud, cfg.neighbors, log)
+        stage("classifying")
+        log(f"{Path(path).name}: classifying points")
+        proba = predict(model["estimator"], features)
+        winning = proba.argmax(axis=1)
+        return np.asarray(model["estimator"].classes_)[winning], proba[np.arange(len(features)), winning]
+    return run_batch(paths, output_root, cfg, info, classify, log, progress)
+
+
+def regroup_run(run_path, output_root, cfg, log=print, progress=None):
+    """Group a previous run's saved point predictions again, with new grouping settings, into a new run.
+
+    Only threshold, cluster radius, minimum points, area method and classified LAS version are taken from
+    cfg; reading settings come from the previous run, and points are not classified again.
+    """
+    validate_settings(cfg)
+    run_path = Path(run_path)
+    previous = json.loads((run_path / "run_metadata.json").read_text(encoding="utf-8"))
+    entries = [e for e in previous["datasets"] if e["status"] != "failed"]
+    if not entries or not all((run_path / e["result_path"] / PREDICTIONS).exists() for e in entries):
+        raise ValueError("These results have no saved point predictions (made by an older version); process again")
+    cfg = Settings(**{**previous["settings"], **{k: getattr(cfg, k) for k in REGROUP_SETTINGS}})
+    info = {k: previous[k] for k in ("model_id", "model_path", "model_sha256", "backend", "classes")}
+    info["regrouped_from"] = str(run_path.resolve())
+
+    def classify(index, path, cloud, stage):
+        stage("classifying")
+        folder, digest = run_path / entries[index]["result_path"], entries[index]["source_sha256"]
+        if sha256(path) != digest:
+            raise ValueError("Input file changed since the previous run; process it again")
+        with np.load(folder / PREDICTIONS, allow_pickle=False) as data:
+            classes, confidence = data["classes"], data["confidence"]
+        if len(classes) != len(cloud["xyz"]):
+            raise ValueError("Saved predictions do not match the input point count")
+        return classes, confidence
+    return run_batch([e["source"] for e in entries], output_root, cfg, info, classify, log, progress)
+
+
+def run_batch(paths, output_root, cfg, info, classify, log, progress):
+    """Shared by processing and regrouping. classify(index, path, cloud, stage) gives per-point class and confidence."""
     run = make_run_directory(paths[0], output_root)
     (run / "objects").mkdir()
     (run / "datasets").mkdir()
     summary = {"software_version": VERSION, "started_at": datetime.now().astimezone().isoformat(),
                "timezone": str(datetime.now().astimezone().tzinfo), "settings": asdict(cfg),
-               "model_id": model["model_id"], "model_path": str(Path(model_path).resolve()),
-               "model_sha256": sha256(model_path),
-               "backend": model["backend"], "classes": model["classes"],
+               **info,
                "definitions": {"centroid": "mean of exported original coordinates",
                    "Intensity": "arithmetic mean of recorded raw LAS intensity; no radiometric correction",
                    "Area": cfg.area_method,
@@ -967,20 +1014,16 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
             entry["input"] = cloud["info"]
             entry["source_sha256"] = sha256(path)
             log(f"{dataset_id}: {len(cloud['xyz']):,} points")
-            stage("features")
-            features = extract_features(cloud, cfg.neighbors, log)
-            stage("classifying")
-            log(f"{dataset_id}: classifying points")
-            proba = predict(model["estimator"], features)
-            winning = proba.argmax(axis=1)
-            classes = np.asarray(model["estimator"].classes_)[winning]
-            confidence = proba[np.arange(len(features)), winning]
+            classes, confidence = classify(number - 1, path, cloud, stage)
+            # Stored types are used here too, so regrouping with the same settings gives the same objects.
+            classes, confidence = classes.astype(np.uint8), confidence.astype(np.float32)
+            np.savez_compressed(folder / PREDICTIONS, classes=classes, confidence=confidence)
             stage("grouping")
             log(f"{dataset_id}: grouping points into objects")
             groups = instance_groups(cloud["xyz"], classes, confidence, cfg)
             stage("writing")
             log(f"{dataset_id}: writing {len(groups)} objects")
-            point_instance = np.zeros(len(features), dtype=np.int32)
+            point_instance = np.zeros(len(classes), dtype=np.int32)
             objects, rows = [], []
             for index, (cls, selected, score) in enumerate(groups, 1):
                 object_id = f"{dataset_id}_O{index:05d}"
@@ -997,7 +1040,7 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
                     writer.writerows(points)
                 rows.append([object_id, *center, len(points), intensity, area, score])
                 objects.append({"object_id": object_id, "instance_index": index, "class_id": cls,
-                                "class_name": model["classes"][str(cls)], "point_count": len(points),
+                                "class_name": info["classes"][str(cls)], "point_count": len(points),
                                 "centroid": center.tolist(), "confidence": score, "area": area,
                                 "csv": str(dest.relative_to(run))})
             with (folder / "report.csv").open("x", newline="", encoding="utf-8-sig") as stream:
@@ -1008,7 +1051,7 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
                                                    cfg.las_output)
             truth_status, targets = None, None
             if truth_path(path).exists():
-                targets, truth_instance = load_truth(truth_path(path), len(features),
+                targets, truth_instance = load_truth(truth_path(path), len(classes),
                                                      source_sha256=entry["source_sha256"])
                 summary_truth, truth_status = evaluate_objects(point_instance, objects, targets, truth_instance)
                 write_json(folder / "evaluation.json", {"source": str(truth_path(path)), "summary": summary_truth,
@@ -1018,11 +1061,11 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
                     f"{summary_truth['false_positives']} false alarms")
             web = web_indices(point_instance, keep=None if truth_status is None else truth_status > 0)
             write_web_view(folder / "view3d.html", Path(path).name, cloud["xyz"][web], point_instance[web],
-                           objects, cloud["xyz"].mean(axis=0), len(features), classes[web], model["classes"],
+                           objects, cloud["xyz"].mean(axis=0), len(classes), classes[web], info["classes"],
                            cloud["intensity"][web], cloud["classification"][web],
                            LAS_CLASSES if cloud["info"]["point_format"] >= 6 else LAS12_CLASSES,
                            None if truth_status is None else truth_status[web], targets)
-            entry["display"] = {"source_points": len(features), "shown_points": len(web), "limit": WEB_LIMIT,
+            entry["display"] = {"source_points": len(classes), "shown_points": len(web), "limit": WEB_LIMIT,
                                 "page": "view3d.html", "method": "object points first, then random background"}
             write_json(folder / "objects.json", objects)
             entry.update(status="success" if objects else "success_no_objects", object_count=len(objects))
@@ -1031,7 +1074,7 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
             # Never expose partial outputs as successful objects.
             for dest in exported:
                 dest.unlink(missing_ok=True)
-            for filename in ("report.csv", "view3d.html", "objects.json", "classified.laz", "evaluation.json"):
+            for filename in ("report.csv", "view3d.html", "objects.json", "classified.laz", "evaluation.json", PREDICTIONS):
                 (folder / filename).unlink(missing_ok=True)
             entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
             log(f"{dataset_id}: FAILED: {exc}")
