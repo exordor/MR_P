@@ -57,7 +57,15 @@ Every class number in the program is an ASPRS code; there is no separate numberi
 
 The metal demonstration uses **64 = metal plate** and **65 = metal sphere**. The standard code 43 means a submerged object without further detail, so it cannot separate plates from spheres.
 
-Each processed file gets `classified.laz`, a copy of the input with every attribute kept. Points in a detected object get that object's target class; all other points keep their input class. An extra dimension `object_instance` holds the object number (0 = none). Point formats 0–5 store only classes 0–31, so they are upgraded to the matching LAS 1.4 format (6, 7, 9 or 10) when a target code is larger.
+Each processed file gets `classified.laz`, a copy of the input with every attribute kept. Points in a detected object get that object's target class; all other points keep their input class. An extra dimension `object_instance` holds the object number (0 = none).
+
+### LAS 1.2 and LAS 1.4
+
+Both versions are read and processed; YellowScan delivers both (the Barsebäck harbour sample is LAS 1.2, point format 3; the river samples are LAS 1.4, point format 7). The differences that matter:
+
+- LAS 1.2 (and 1.3) point formats 0–5 store only classes 0–31 and define no user-definable range or topo-bathy codes. The Barsebäck file marks all water as 9; the river files split water into 40, 41 and 45. Without class 40, the height-above-riverbed feature is unavailable and the model relies on the other features.
+- The **Classified LAS** setting chooses the version of `classified.laz`. With **same as input** (default), LAS 1.4 stays 1.4 and LAS 1.2 stays 1.2 with the same point format. A target code above 31 (such as 64) cannot fit the 1.2 class field, so it is written to the User Data field of target points; their class field keeps the input class. With **1.4**, every file is written as LAS 1.4 in the matching point format (0, 1 → 6; 2, 3 → 7; 4 → 9; 5 → 10), with the CRS stored as WKT, and target codes go in the class field. `run_metadata.json` records which was used.
+- A LAS/LAZ label file in a 1.2/1.3 point format may mark targets above 31 in User Data, the same way the classified output does.
 
 Training labels are LAS codes too. In a `point_index,class_id` CSV, a target class marks a target point. Any other code (0, 2, 40, …) marks a point that is not a target, and a blank value or -1 means unlabelled. Labels can also be a LAS/LAZ file: mark target points with their target class (for example in CloudCompare) and set the manifest's `labels` to that file.
 

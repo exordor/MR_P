@@ -53,6 +53,11 @@ LAS_CLASSES = {0: "created, never classified", 1: "unclassified", 2: "ground", 3
                17: "bridge deck", 18: "high noise", 19: "overhead structure", 20: "ignored ground",
                21: "snow", 22: "temporal exclusion", 40: "bathymetric point (bottom)", 41: "water surface",
                42: "derived water surface", 43: "submerged object", 44: "IHO S-57 object", 45: "water column"}
+# LAS 1.0-1.3 define fewer classes (no user-definable range, no topo-bathy codes) and store only 0-31.
+LAS12_CLASSES = {0: "created, never classified", 1: "unclassified", 2: "ground", 3: "low vegetation",
+                 4: "medium vegetation", 5: "high vegetation", 6: "building", 7: "low point (noise)",
+                 8: "model key-point", 9: "water", 12: "overlap points"}
+LAS_OUTPUTS = ("same as input", "1.4")
 USER_CLASS_MIN = 64  # 64..255 are user-definable in the standard; own target classes must use these codes.
 NOT_TARGET = 0  # Internal model label for points that are not a target; never written to LAS output.
 
@@ -79,6 +84,7 @@ class Settings:
     crs_override: str = ""
     coordinates_in_meters: bool = False
     vertical_datum: str = "unspecified"
+    las_output: str = "same as input"  # Version of classified.laz: "same as input" or "1.4".
 
 
 def write_json(path, value):
@@ -100,6 +106,8 @@ def validate_settings(cfg):
         raise ValueError("Invalid probability threshold / cluster radius / minimum points")
     if cfg.area_method not in ("unresolved", "convex_hull_xy"):
         raise ValueError("Unsupported area method")
+    if cfg.las_output not in LAS_OUTPUTS:
+        raise ValueError(f"Classified LAS version must be one of {LAS_OUTPUTS}")
 
 
 def physical_memory():
@@ -330,7 +338,11 @@ def load_labels(path, count, targets=None):
     """
     targets = list(targets or ())
     if Path(path).suffix.lower() in (".las", ".laz"):
-        codes = np.asarray(laspy.read(path).classification, dtype=np.int32)
+        las = laspy.read(path)
+        codes = np.asarray(las.classification, dtype=np.int32)
+        if las.header.point_format.id < 6:  # LAS 1.2/1.3: codes above 31 are kept in User Data.
+            user = np.asarray(las.user_data, dtype=np.int32)
+            codes = np.where(np.isin(user, [t for t in targets if t > 31]), user, codes)
         if len(codes) != count:
             raise ValueError("Label LAS/LAZ has a different point count from its point cloud")
         return np.where(np.isin(codes, targets), codes, NOT_TARGET)
@@ -630,7 +642,7 @@ def web_indices(instance, limit=WEB_LIMIT, keep=None):
 
 
 def write_web_view(dest, name, xyz, instance, objects, origin, total, predicted=None, class_names=None,
-                   intensity=None, las_classes=None, truth=None, truth_objects=None):
+                   intensity=None, las_classes=None, las_names=LAS_CLASSES, truth=None, truth_objects=None):
     """Self-contained offline HTML page drawing the points with WebGL (GPU).
 
     predicted: class ID per point, class_names: {class ID: name}; intensity: raw LAS intensity per point;
@@ -654,7 +666,7 @@ def write_web_view(dest, name, xyz, instance, objects, origin, total, predicted=
     if las_classes is not None:
         codes = sorted(int(c) for c in np.unique(las_classes))
         data["las"] = encode(np.asarray(las_classes, dtype=np.uint8))
-        data["las_names"] = [[c, LAS_CLASSES.get(c, "user-defined" if c >= USER_CLASS_MIN else "reserved")]
+        data["las_names"] = [[c, las_names.get(c, "user-defined" if c >= USER_CLASS_MIN else "reserved")]
                              for c in codes]
     if truth is not None:
         data["truth"] = encode(np.asarray(truth, dtype=np.uint8))
@@ -766,25 +778,41 @@ def evaluate_objects(point_instance, objects, targets, truth_instance, min_iou=0
 POINT_FORMAT_WITH_FULL_CLASS = {0: 6, 1: 6, 2: 7, 3: 7, 4: 9, 5: 10}
 
 
-def write_classified(source, dest, groups, point_instance):
+def write_classified(source, dest, groups, point_instance, las_output="same as input"):
     """Copy of the input with every attribute kept; detected target points get their target LAS class.
 
     Points not in a detected object keep the input (vendor) class. An extra dimension object_instance
-    holds the object number (0 = none). Point formats 0-5 only store classes 0-31, so they are upgraded
-    to the matching LAS 1.4 format when a target code is larger.
+    holds the object number (0 = none). LAS 1.2/1.3 point formats (0-5) store only classes 0-31:
+    "same as input" keeps the version and puts larger target codes in the User Data field of target
+    points; "1.4" converts to the matching LAS 1.4 format, where the class field holds every code.
+    Returns where the target codes were written.
     """
     las = laspy.read(source)
-    codes = np.asarray(las.classification, dtype=np.uint8).copy()
-    for cls, selected, _ in groups:
-        codes[selected] = cls
-    if las.header.point_format.id < 6 and codes.max() > 31:
+    if las_output == "1.4" and las.header.point_format.id < 6:
+        crs = las.header.parse_crs()
         las = laspy.convert(las, point_format_id=POINT_FORMAT_WITH_FULL_CLASS[las.header.point_format.id],
                             file_version="1.4")
+        if crs is not None:  # Formats 6-10 must store the CRS as WKT.
+            las.header.add_crs(crs)
+    full = las.header.point_format.id >= 6
+    codes = np.asarray(las.classification, dtype=np.uint8).copy()
+    user = np.asarray(las.user_data, dtype=np.uint8).copy()
+    in_user_data = False
+    for cls, selected, _ in groups:
+        if full or cls <= 31:
+            codes[selected] = cls
+        else:
+            user[selected] = cls
+            in_user_data = True
     las.classification = codes
+    las.user_data = user
     las.add_extra_dim(laspy.ExtraBytesParams(name="object_instance", type=np.uint32,
                                              description="Detected object number, 0 = none"))
     las.object_instance = point_instance.astype(np.uint32)
     las.write(dest)
+    return {"file": Path(dest).name, "las_version": str(las.header.version),
+            "point_format": las.header.point_format.id,
+            "target_codes_in": "user_data" if in_user_data else "classification"}
 
 
 # Rough share of a file's processing time per stage, for the progress bar.
@@ -871,7 +899,8 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
                 writer = csv.writer(stream)
                 writer.writerow(HEADERS)
                 writer.writerows(rows)
-            write_classified(path, folder / "classified.laz", groups, point_instance)
+            entry["classified"] = write_classified(path, folder / "classified.laz", groups, point_instance,
+                                                   cfg.las_output)
             truth_status, targets = None, None
             if truth_path(path).exists():
                 targets, truth_instance = load_truth(truth_path(path), len(features))
@@ -885,6 +914,7 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
             write_web_view(folder / "view3d.html", Path(path).name, cloud["xyz"][web], point_instance[web],
                            objects, cloud["xyz"].mean(axis=0), len(features), classes[web], model["classes"],
                            cloud["intensity"][web], cloud["classification"][web],
+                           LAS_CLASSES if cloud["info"]["point_format"] >= 6 else LAS12_CLASSES,
                            None if truth_status is None else truth_status[web], targets)
             entry["display"] = {"source_points": len(features), "shown_points": len(web), "limit": WEB_LIMIT,
                                 "page": "view3d.html", "method": "object points first, then random background"}

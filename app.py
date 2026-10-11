@@ -408,10 +408,13 @@ class App(QMainWindow):
 
         self.area = QComboBox()
         self.area.addItems(["unresolved", "convex_hull_xy"])
+        self.las_output = QComboBox()
+        self.las_output.addItems(["same as input", "1.4"])
         fields = [[("Fallback CRS", self.crs), ("Vertical datum", self.datum), (None, self.meters)],
                   [("Score threshold", self.threshold), ("Cluster radius m", self.radius),
                    ("Min object points", self.minimum), ("Area method", self.area)],
-                  [("Neighbours", self.neighbors), ("Max points / file", self.limit)]]
+                  [("Neighbours", self.neighbors), ("Max points / file", self.limit),
+                   ("Classified LAS", self.las_output)]]
         tips = {
             self.crs: "Projected CRS to use when a file has none, e.g. EPSG:32632. Ignored when the file has its own CRS.",
             self.datum: "Name of the vertical datum. It is recorded in the results and does not affect calculations.",
@@ -425,6 +428,10 @@ class App(QMainWindow):
             self.area: "How object area is computed: unresolved leaves Area blank; convex_hull_xy uses the area of the XY convex hull.",
             self.neighbors: "Neighbouring points (3 to 128) used to compute each point's local shape features during training.\n"
                             "Processing uses the model's training value. Higher is smoother but slower; lower is more detailed but more sensitive to noise.",
+            self.las_output: "LAS version of classified.laz, the copy of each input with detected targets classified.\n"
+                             "same as input: LAS 1.4 stays 1.4; LAS 1.2/1.3 stays 1.2/1.3. Those versions store only "
+                             "classes 0-31, so a target code such as 64 is written to the User Data field of its points.\n"
+                             "1.4: always LAS 1.4, where the class field holds every code (64, 65, ...).",
             self.limit: "Maximum points allowed per file; 0 means no limit and the whole file is processed.\n"
                         "A limit guards against processing huge files by mistake; files above it are refused.",
         }
@@ -445,7 +452,7 @@ class App(QMainWindow):
                         threshold=float(self.threshold.text()), cluster_eps=float(self.radius.text()),
                         min_points=int(self.minimum.text()), area_method=self.area.currentText(),
                         crs_override=self.crs.text().strip(), coordinates_in_meters=self.meters.isChecked(),
-                        vertical_datum=self.datum.text().strip())
+                        vertical_datum=self.datum.text().strip(), las_output=self.las_output.currentText())
 
     def log(self, message):
         """Thread-safe: may be called from the worker thread."""
@@ -671,6 +678,7 @@ class App(QMainWindow):
             self.neighbors.setText(str(cfg["neighbors"]))
             self.limit.setText(str(cfg["max_points"]))
             self.area.setCurrentText(cfg["area_method"])
+            self.las_output.setCurrentText(cfg.get("las_output", "same as input"))
             self.crs.setText(cfg["crs_override"])
             self.datum.setText(cfg["vertical_datum"])
             self.meters.setChecked(cfg["coordinates_in_meters"])

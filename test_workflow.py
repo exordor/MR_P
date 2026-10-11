@@ -20,6 +20,10 @@ from sklearn.cluster import DBSCAN
 
 
 
+REAL_LAS_12 = Path("/Users/jlw/code/MR/data/public/yellowscan_navigator/"
+                   "SW_NAV_60mAGL_5ms_SACLCOmod_EPSG_32633_Barsebackshamn_harbour-F001.las")
+
+
 def web_data(folder):
     page = (Path(folder) / "view3d.html").read_text(encoding="utf-8")
     return json.loads(page.split('type="application/json">', 1)[1].split("</script>", 1)[0])
@@ -264,26 +268,68 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(summary["missed_targets"], ["T2"])
         np.testing.assert_array_equal(status, [0, 1, 1, 1, 2, 2, 3, 3, 2, 2])
 
-    def test_classified_laz_keeps_input_classes_and_upgrades_old_formats(self):
+    def test_classified_laz_for_las_1_2_and_1_4(self):
         sample = self.manifest.parent / "SYNTHETIC_test.laz"
         original = laspy.read(sample)
-        self.assertEqual(original.header.point_format.id, 3)  # Only classes 0-31 fit in this format.
+        self.assertEqual((str(original.header.version), original.header.point_format.id), ("1.2", 3))
         original.classification = np.full(len(original.points), 2, dtype=np.uint8)
+        original.user_data = np.full(len(original.points), 7, dtype=np.uint8)
         source = self.root / "classes.laz"
         original.write(source)
-        selected = np.arange(5, 15)
+        selected, other = np.arange(5, 15), np.arange(20, 25)
         instance = np.zeros(len(original.points), dtype=np.int32)
-        instance[selected] = 1
-        dest = self.root / "classified.laz"
-        core.write_classified(source, dest, [(64, selected, 0.9)], instance)
+        instance[selected], instance[other] = 1, 2
+        groups = [(64, selected, 0.9), (6, other, 0.8)]
+        # Same version: LAS 1.2 holds classes 0-31 only, so code 64 goes to User Data; 6 fits the class field.
+        dest = self.root / "classified_12.laz"
+        info = core.write_classified(source, dest, groups, instance)
+        self.assertEqual(info, {"file": "classified_12.laz", "las_version": "1.2", "point_format": 3,
+                                "target_codes_in": "user_data"})
         result = laspy.read(dest)
-        self.assertEqual(result.header.point_format.id, 7)
-        codes = np.asarray(result.classification)
-        self.assertTrue((codes[selected] == 64).all())
-        self.assertTrue((np.delete(codes, selected) == 2).all())
+        codes, user = np.asarray(result.classification), np.asarray(result.user_data)
+        self.assertTrue((codes[selected] == 2).all() and (user[selected] == 64).all())
+        self.assertTrue((codes[other] == 6).all() and (user[other] == 7).all())
         np.testing.assert_array_equal(result.object_instance, instance)
         np.testing.assert_allclose(result.x, original.x)
+        # Labels read back from that LAS 1.2 file recover the target codes.
+        labels = core.load_labels(dest, len(codes), {64, 6})
+        self.assertTrue((labels[selected] == 64).all() and (labels[other] == 6).all())
+        self.assertEqual(int((labels > 0).sum()), len(selected) + len(other))
+        # LAS 1.4: matching point format, every code in the class field, CRS stored as WKT.
+        dest = self.root / "classified_14.laz"
+        info = core.write_classified(source, dest, groups, instance, "1.4")
+        self.assertEqual((info["las_version"], info["point_format"], info["target_codes_in"]),
+                         ("1.4", 7, "classification"))
+        result = laspy.read(dest)
+        codes = np.asarray(result.classification)
+        self.assertTrue((codes[selected] == 64).all() and (codes[other] == 6).all())
+        self.assertTrue((np.delete(codes, np.r_[selected, other]) == 2).all())
+        self.assertTrue(result.header.global_encoding.wkt)
+        self.assertEqual(result.header.parse_crs().to_epsg(), 32632)
         np.testing.assert_array_equal(result.intensity, original.intensity)
+        with self.assertRaisesRegex(ValueError, "Classified LAS"):
+            core.validate_settings(Settings(las_output="1.3"))
+
+    @unittest.skipUnless(REAL_LAS_12.exists(), "public YellowScan LAS 1.2 sample not available")
+    def test_real_yellowscan_las_1_2_file(self):
+        las = laspy.read(REAL_LAS_12)
+        self.assertEqual((str(las.header.version), las.header.point_format.id), ("1.2", 3))
+        x, y = np.asarray(las.x), np.asarray(las.y)
+        keep = (np.abs(x - np.median(x)) < 15) & (np.abs(y - np.median(y)) < 15)
+        crop = laspy.LasData(las.header)
+        crop.points = las.points[keep].copy()
+        path = self.root / "real_12.laz"
+        crop.write(path)
+        cloud = read_cloud(path, self.cfg)
+        self.assertEqual(set(np.unique(cloud["classification"])) - {1, 2, 7, 9}, set())
+        self.assertEqual(extract_features(cloud).shape, (keep.sum(), len(core.FEATURES)))
+        run = Path(process_batch([path], self.model, self.root / "real_12_runs", self.cfg, log=lambda x: None))
+        entry = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))["datasets"][0]
+        self.assertTrue(entry["status"].startswith("success"), entry.get("error"))
+        result = laspy.read(run / "datasets" / "D0001" / "classified.laz")
+        self.assertEqual((str(result.header.version), result.header.point_format.id), ("1.2", 3))
+        np.testing.assert_array_equal(np.asarray(result.classification)[np.asarray(result.object_instance) == 0],
+                                      np.asarray(crop.classification)[np.asarray(result.object_instance) == 0])
 
     def test_labels_from_las_classification(self):
         sample = self.manifest.parent / "SYNTHETIC_test.laz"
