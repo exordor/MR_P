@@ -8,6 +8,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
+import laspy
 import numpy as np
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt, QUrl, Signal
 from PySide6.QtGui import QColor
@@ -32,7 +33,7 @@ def size_text(count):
 
 class InspectDialog(QDialog):
     """Header summary of every input file; read-only, so it needs no settings."""
-    HEADERS = ["File", "Points", "File size", "Width X m", "Width Y m", "Z min", "Z max", "CRS", "Memory needed",
+    HEADERS = ["File", "LAS version", "Points", "File size", "Width X m", "Width Y m", "Z min", "Z max", "CRS", "Memory needed",
                "Check"]
 
     def __init__(self, summaries, parent=None):
@@ -45,18 +46,19 @@ class InspectDialog(QDialog):
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         for row, info in enumerate(summaries):
             if "error" in info:
-                cells = [info["name"]] + [""] * 8 + [info["error"]]
+                cells = [info["name"]] + [""] * 9 + [info["error"]]
             else:
                 (x0, y0, z0), (x1, y1, z1) = info["mins"], info["maxs"]
                 memory = size_text(info["memory_bytes"])
                 if info["ram_bytes"]:
                     memory += f" of {size_text(info['ram_bytes'])}"
-                cells = [info["name"], f"{info['point_count']:,}", size_text(info["file_bytes"]),
+                cells = [info["name"], f"{info['las_version']} (format {info['point_format']})",
+                         f"{info['point_count']:,}", size_text(info["file_bytes"]),
                          f"{x1 - x0:,.2f}", f"{y1 - y0:,.2f}", f"{z0:,.2f}", f"{z1:,.2f}",
                          info["crs"] or "none", memory, "; ".join(info["issues"]) or "OK"]
             for column, text in enumerate(cells):
                 item = QTableWidgetItem(text)
-                if 1 <= column <= 6:
+                if 2 <= column <= 7:
                     item.setTextAlignment(int(Qt.AlignRight | Qt.AlignVCenter))
                 if "error" not in info:
                     item.setToolTip(f"{info['source']}\nLAS {info['las_version']}, point format "
@@ -519,8 +521,24 @@ class App(QMainWindow):
         paths, _ = QFileDialog.getOpenFileNames(self, "Point clouds", "", "Point clouds (*.las *.laz)")
         for path in paths:
             if path not in self.paths:
-                self.paths.append(path)
-                self.inputs.addItem(path)
+                self.add_input(path)
+
+    def add_input(self, path):
+        """List a file with its LAS version and point format, read from the header only."""
+        self.paths.append(path)
+        try:
+            with laspy.open(path) as reader:
+                header = reader.header
+                version, point_format, count = str(header.version), header.point_format.id, header.point_count
+        except Exception as exc:  # Listed anyway; processing reports the problem for this file.
+            self.inputs.addItem(f"{path}    ·    header unreadable: {exc}")
+            return
+        self.inputs.addItem(f"{path}    ·    LAS {version} · point format {point_format} · {count:,} points")
+        self.inputs.item(self.inputs.count() - 1).setToolTip(
+            f"{path}\nLAS {version}, point format {point_format}: "
+            + ("class field holds codes 0-255" if point_format >= 6 else
+               "class field holds codes 0-31 only (target codes above 31 go to User Data unless "
+               "Classified LAS is set to 1.4)"))
 
     def clear_files(self):
         self.paths = []
@@ -603,8 +621,7 @@ class App(QMainWindow):
             self.model_path.setText(str(demo / "METAL_MODEL.joblib"))
             self.manifest_path.setText(str(demo / "manifest.json"))
             self.clear_files()
-            self.paths = [str(demo / "DEVILS_BRIDGE.laz")]
-            self.inputs.addItem(self.paths[0])
+            self.add_input(str(demo / "DEVILS_BRIDGE.laz"))
             self.load_run(candidates[-1].parent)
             self.reuse_run_settings()
             self.log("Loaded metal targets demo (real scenes, simulated targets).")
@@ -621,8 +638,7 @@ class App(QMainWindow):
             self.datum.setText("synthetic_local_z")
             self.area.setCurrentText("convex_hull_xy")
             self.clear_files()
-            self.paths = [str(demo / "SYNTHETIC_test.laz")]
-            self.inputs.addItem(self.paths[0])
+            self.add_input(str(demo / "SYNTHETIC_test.laz"))
             self.load_run(candidates[-1].parent)
             self.log("Loaded synthetic demo.")
         self.safe_action(action)
@@ -641,7 +657,9 @@ class App(QMainWindow):
         self.dataset.clear()
         for key, e in self.datasets.items():
             failed_text = "  ✖ failed" if e["status"] == "failed" else ""
-            self.dataset.addItem(f"{key} | {Path(e['source']).name}{failed_text}")
+            version = e.get("input", {}).get("las_version")
+            version_text = f" | LAS {version}" if version else ""
+            self.dataset.addItem(f"{key} | {Path(e['source']).name}{version_text}{failed_text}")
             if failed_text:
                 self.dataset.setItemData(self.dataset.count() - 1, e.get("error", ""), Qt.ToolTipRole)
         self.dataset.blockSignals(False)
