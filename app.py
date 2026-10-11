@@ -359,8 +359,10 @@ class App(QMainWindow):
         self.path_row(grid, 0, "Dataset manifest JSON", self.manifest_path, self.pick_manifest,
                       "Dataset manifest JSON listing the point clouds and label files for training, validation and testing.")
         layout.addLayout(grid)
-        hint = QLabel("Labels: point_index,class_id  (0 = background, -1 = unlabelled)")
-        hint.setToolTip("One row per labelled point; positive IDs are target classes.\n"
+        hint = QLabel("Labels: point_index,class_id as ASPRS LAS class codes (blank or -1 = unlabelled), "
+                      "or a LAS/LAZ file")
+        hint.setToolTip("Target classes use the manifest's codes: user-definable 64-255 or a defined ASPRS class "
+                        "such as 43 (submerged object).\nAny other code (0, 2, 40, ...) means the point is not a target.\n"
                         "Train, validation and test must come from different scenes.")
         layout.addWidget(hint)
         row = QHBoxLayout()

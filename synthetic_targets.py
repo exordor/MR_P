@@ -187,7 +187,7 @@ def create_metal_demo(destination):
     for seed, (name, split, source, box, count) in enumerate(SCENES):
         print(f"{name}: placing {count} targets")
         records.append(make_scene(name, split, source, box, count, destination, seed + 7))
-    classes = {"0": "background", **{str(k): v for k, v in TARGETS.items()}}
+    classes = {str(k): v for k, v in TARGETS.items()}
     manifest = destination / "manifest.json"
     # Unweighted classes: with class balancing the riverbed gave several times more false alarms.
     manifest.write_text(json.dumps({"classes": classes, "balance_classes": False, "datasets": records}, indent=2),

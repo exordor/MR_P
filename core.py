@@ -43,14 +43,27 @@ FEATURES = ["local_height", "roughness", "linearity", "planarity", "sphericity",
             "multi_return", "last_return", "scan_angle", "return_missing",
             "height_above_bed", "bed_known", "las_bathymetric_bottom", "las_water_surface",
             "las_water_column", "las_ground", "las_noise"]
-# ASPRS LAS 1.4 classification codes (including the topo-bathy codes YellowScan uses).
-# Input codes are kept on every point the model does not mark as a target.
-LAS_CLASSES = {0: "never classified", 1: "unassigned", 2: "ground", 3: "low vegetation",
-               4: "medium vegetation", 5: "high vegetation", 6: "building", 7: "low noise",
-               9: "water", 17: "bridge deck", 18: "high noise", 40: "bathymetric bottom",
-               41: "water surface", 42: "derived water surface", 43: "submerged object",
-               44: "IHO S-57 object", 45: "water column"}
-USER_CLASS_MIN = 64  # 64..255 are user-definable; trained target classes should use these codes.
+# ASPRS LAS 1.4 (R15) classification codes, with the topo-bathy codes 40-45 that YellowScan uses.
+# All class numbers in this program are these codes. Input codes are kept on every point the model does
+# not mark as a target. Codes not listed here and below 64 are reserved by the standard.
+LAS_CLASSES = {0: "created, never classified", 1: "unclassified", 2: "ground", 3: "low vegetation",
+               4: "medium vegetation", 5: "high vegetation", 6: "building", 7: "low point (noise)",
+               9: "water", 10: "rail", 11: "road surface", 13: "wire - guard (shield)",
+               14: "wire - conductor (phase)", 15: "transmission tower", 16: "wire-structure connector",
+               17: "bridge deck", 18: "high noise", 19: "overhead structure", 20: "ignored ground",
+               21: "snow", 22: "temporal exclusion", 40: "bathymetric point (bottom)", 41: "water surface",
+               42: "derived water surface", 43: "submerged object", 44: "IHO S-57 object", 45: "water column"}
+USER_CLASS_MIN = 64  # 64..255 are user-definable in the standard; own target classes must use these codes.
+NOT_TARGET = 0  # Internal model label for points that are not a target; never written to LAS output.
+
+
+def check_target_code(code):
+    """A trained target class must be a defined ASPRS class or a user-definable code (64-255)."""
+    if code in (0, 1):
+        raise ValueError(f"Class {code} ({LAS_CLASSES[code]}) means a point has no class and cannot be a target")
+    if not (code in LAS_CLASSES or USER_CLASS_MIN <= code <= 255):
+        raise ValueError(f"Class {code} is reserved in the ASPRS LAS standard; use a defined class "
+                         f"(e.g. 43 submerged object) or a user-definable code {USER_CLASS_MIN}-255")
 BED_CELL = 1.0  # metres; grid used to estimate the local riverbed / seabed surface.
 BED_WINDOW = 5  # cells; median over this window, so objects up to ~2 m do not lift the bed.
 
@@ -311,14 +324,16 @@ def label_template(path, output, cfg):
 def load_labels(path, count, targets=None):
     """point_index,class_id CSV, or a LAS/LAZ whose classification field marks the targets.
 
-    In a LAS/LAZ label file every point whose code is one of the manifest's target classes is that target;
-    all other points are background (0), whatever their vendor class.
+    Labels are ASPRS LAS class codes. A point whose code is one of the manifest's target classes is that
+    target; any other code (0, 2, 40, ...) means "not a target" (internal label NOT_TARGET).
+    In a CSV, a blank class_id or -1 means unlabelled.
     """
+    targets = list(targets or ())
     if Path(path).suffix.lower() in (".las", ".laz"):
         codes = np.asarray(laspy.read(path).classification, dtype=np.int32)
         if len(codes) != count:
             raise ValueError("Label LAS/LAZ has a different point count from its point cloud")
-        return np.where(np.isin(codes, list(targets or ())), codes, 0)
+        return np.where(np.isin(codes, targets), codes, NOT_TARGET)
     labels = np.full(count, -1, dtype=np.int32)
     seen = set()
     with Path(path).open(newline="", encoding="utf-8-sig") as stream:
@@ -333,9 +348,10 @@ def load_labels(path, count, targets=None):
             value = row["class_id"].strip()
             if value:
                 label = int(value)
-                if label < -1:
-                    raise ValueError("class_id: -1=unlabelled, 0=background, positive=target")
+                if not -1 <= label <= 255:
+                    raise ValueError("class_id must be an ASPRS LAS class code 0..255, or -1 / blank = unlabelled")
                 labels[idx] = label
+    return np.where((labels >= 0) & ~np.isin(labels, targets), NOT_TARGET, labels)
     return labels
 
 
@@ -343,8 +359,14 @@ def load_manifest(path):
     path = Path(path)
     manifest = json.loads(path.read_text(encoding="utf-8-sig"))
     classes = manifest.get("classes", {})
-    if "0" not in classes or len(classes) < 2 or any(not 0 <= int(c) <= 255 for c in classes):
-        raise ValueError("classes must define 0=background and at least one target code 1..255 (LAS classes)")
+    if "0" in classes:
+        raise ValueError('List only target classes: remove "0". Points that are not targets keep their own '
+                         "LAS class; there is no separate background class")
+    if not classes:
+        raise ValueError("classes must list at least one target class (ASPRS LAS code)")
+    for code in classes:
+        check_target_code(int(code))
+    classes = {str(NOT_TARGET): "not a target", **{str(int(k)): v for k, v in classes.items()}}
     records, groups, files, hashes = [], {}, set(), set()
     for entry in manifest["datasets"]:
         entry = dict(entry)
@@ -391,8 +413,6 @@ def collect(records, split, cfg, classes, log):
         selected = labels >= 0
         if not selected.any():
             raise ValueError(f"No labels: {record['labels']}")
-        if not set(np.unique(labels[selected])) <= {int(k) for k in classes}:
-            raise ValueError("Label class not defined in manifest")
         count += int(selected.sum())
         if cfg.max_points and count > cfg.max_points:
             raise ValueError("Total labelled points in split exceeds prototype max_points limit")
@@ -410,7 +430,7 @@ def train_model(manifest_path, output_path, cfg, backend="random_forest", iterat
     manifest = load_manifest(manifest_path)
     x, y = collect(manifest["datasets"], "train", cfg, manifest["classes"], log)
     if set(np.unique(y)) != {int(k) for k in manifest["classes"]}:
-        raise ValueError("Training data must contain every declared class, including background")
+        raise ValueError("Training labels must contain every target class and some non-target points")
     if backend == "random_forest":
         estimator = RandomForestClassifier(n_estimators=iterations,
                                            class_weight="balanced" if manifest["balance_classes"] else None,

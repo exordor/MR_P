@@ -174,7 +174,7 @@ class WorkflowTest(unittest.TestCase):
         objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
         self.assertEqual({o[1] for o in data["objects"]}, {o["object_id"] for o in objects})
         self.assertEqual(set(instance) - {0}, {o["instance_index"] for o in objects})
-        self.assertEqual(data["classes"], [[0, "background"], [1, "synthetic_object"]])
+        self.assertEqual(data["classes"], [[0, "not a target"], [64, "synthetic_object"]])
         cls = np.frombuffer(base64.b64decode(data["cls"]), dtype=np.uint8)
         self.assertEqual(len(cls), count)
         self.assertTrue(set(cls[instance > 0]) - {0})  # Object points carry a target class.
@@ -212,7 +212,7 @@ class WorkflowTest(unittest.TestCase):
         dest = self.root / "test_metrics.json"
         evaluate_model(self.model, dest, self.cfg, log=lambda x: None)
         result = json.loads(dest.read_text())
-        self.assertEqual(result["class_order"], [0, 1])
+        self.assertEqual(result["class_order"], [0, 64])
         self.assertIn("confusion_matrix", result)
         mlp_path = self.root / "mlp.joblib"
         train_model(self.manifest, mlp_path, self.cfg, backend="mlp", iterations=2, log=lambda x: None)
@@ -287,16 +287,37 @@ class WorkflowTest(unittest.TestCase):
 
     def test_labels_from_las_classification(self):
         sample = self.manifest.parent / "SYNTHETIC_test.laz"
-        las = laspy.read(sample)
-        codes = np.full(len(las.points), 2, dtype=np.uint8)
-        codes[:7] = 1
+        las = laspy.convert(laspy.read(sample), point_format_id=7, file_version="1.4")
+        codes = np.full(len(las.points), 40, dtype=np.uint8)
+        codes[:7] = 64
+        codes[7:9] = 2
         las.classification = codes
         path = self.root / "labels_as_las.laz"
         las.write(path)
-        labels = core.load_labels(path, len(codes), {1})
-        np.testing.assert_array_equal(labels, np.where(codes == 1, 1, 0))
+        labels = core.load_labels(path, len(codes), {64})
+        np.testing.assert_array_equal(labels, np.where(codes == 64, 64, 0))
         with self.assertRaisesRegex(ValueError, "point count"):
-            core.load_labels(path, len(codes) + 1, {1})
+            core.load_labels(path, len(codes) + 1, {64})
+
+    def test_csv_labels_are_las_codes(self):
+        path = self.root / "codes.csv"
+        path.write_text("point_index,class_id\n0,64\n1,40\n2,\n3,-1\n4,0\n5,65\n", encoding="utf-8")
+        np.testing.assert_array_equal(core.load_labels(path, 6, {64}), [64, 0, -1, -1, 0, 0])
+        path.write_text("point_index,class_id\n0,256\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "0..255"):
+            core.load_labels(path, 1, {64})
+
+    def test_manifest_classes_must_follow_asprs(self):
+        source = json.loads(self.manifest.read_text())
+        changed = self.manifest.parent / "classes.json"
+        for classes, message in (({"0": "background", "64": "x"}, "remove"), ({"1": "x"}, "no class"),
+                                 ({"0": "x"}, "remove"), ({"30": "x"}, "reserved"), ({}, "at least one")):
+            changed.write_text(json.dumps({**source, "classes": classes}))
+            with self.assertRaisesRegex(ValueError, message):
+                load_manifest(changed)
+        changed.write_text(json.dumps({**source, "classes": {"43": "submerged object", "200": "own class"}}))
+        self.assertEqual(load_manifest(changed)["classes"],
+                         {"0": "not a target", "43": "submerged object", "200": "own class"})
 
     def test_ground_truth_evaluation_in_batch(self):
         folder = self.root / "with_truth"
@@ -305,9 +326,9 @@ class WorkflowTest(unittest.TestCase):
         shutil.copy2(self.manifest.parent / "SYNTHETIC_test.laz", sample)
         count = len(read_cloud(sample, self.cfg)["xyz"])
         # create_demo writes 1800 background points, then two objects of 140 points.
-        targets = [{"object_id": f"T{i}", "class_id": 1, "class_name": "synthetic_object",
+        targets = [{"object_id": f"T{i}", "class_id": 64, "class_name": "synthetic_object",
                     "center": [0, 0, 0], "point_range": [1800 + 140 * (i - 1), 1800 + 140 * i]} for i in (1, 2)]
-        targets.append({"object_id": "T3", "class_id": 1, "class_name": "synthetic_object",
+        targets.append({"object_id": "T3", "class_id": 64, "class_name": "synthetic_object",
                         "center": [0, 0, 0], "point_indices": [0, 1, 2]})
         core.truth_path(sample).write_text(json.dumps({"point_count": count, "objects": targets}))
         run = Path(process_batch([sample], self.model, self.root / "truth_runs", self.cfg, log=lambda x: None))
