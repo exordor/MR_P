@@ -432,7 +432,7 @@ class App(QMainWindow):
                             "Processing uses the model's training value. Higher is smoother but slower; lower is more detailed but more sensitive to noise.",
             self.las_output: "LAS version of classified.laz, the copy of each input with detected targets classified.\n"
                              "same as input: LAS 1.4 stays 1.4; LAS 1.2/1.3 stays 1.2/1.3. Those versions store only "
-                             "classes 0-31, so a target code such as 64 is written to the User Data field of its points.\n"
+                             "classes 0-31, so a target code such as 64 is stored in the object_class extra field. User Data is preserved.\n"
                              "1.4: always LAS 1.4, where the class field holds every code (64, 65, ...).",
             self.limit: "Maximum points allowed per file; 0 means no limit and the whole file is processed.\n"
                         "A limit guards against processing huge files by mistake; files above it are refused.",
@@ -537,7 +537,7 @@ class App(QMainWindow):
         self.inputs.item(self.inputs.count() - 1).setToolTip(
             f"{path}\nLAS {version}, point format {point_format}: "
             + ("class field holds codes 0-255" if point_format >= 6 else
-               "class field holds codes 0-31 only (target codes above 31 go to User Data unless "
+               "class field holds codes 0-31 only (target codes above 31 go to object_class unless "
                "Classified LAS is set to 1.4)"))
 
     def clear_files(self):

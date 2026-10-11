@@ -15,6 +15,7 @@ from pathlib import Path
 import laspy
 import numpy as np
 from scipy.spatial import Delaunay, cKDTree
+from core import sha256, write_label_source
 
 TARGETS = {64: "metal_plate", 65: "metal_sphere"}  # LAS user-definable class codes (64..255).
 DATA = Path("/Users/jlw/code/MR/data/public/yellowscan_navigator")
@@ -172,8 +173,9 @@ def make_scene(name, split, source, box, count, destination, seed):
         writer = csv.writer(stream)
         writer.writerow(["point_index", "class_id"])
         writer.writerows((i, "" if v < 0 else v) for i, v in enumerate(labels))
+    write_label_source(path.with_suffix(".labels.csv"), path, len(labels))
     path.with_suffix(".truth.json").write_text(json.dumps(
-        {"point_count": len(out.points), "synthetic_targets": True, "source": source, "box": box,
+        {"point_count": len(out.points), "source_sha256": sha256(path), "synthetic_targets": True, "source": source, "box": box,
          "classes": {str(k): v for k, v in TARGETS.items()}, "objects": targets}, indent=1), encoding="utf-8")
     return {"path": path.name, "labels": path.with_suffix(".labels.csv").name, "split": split, "scene_id": name}
 

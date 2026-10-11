@@ -7,7 +7,7 @@ import laspy
 import numpy as np
 from pyproj import CRS
 
-from core import Settings, process_batch, train_model
+from core import Settings, process_batch, train_model, write_label_source
 
 
 def create_demo(destination):
@@ -44,6 +44,7 @@ def create_demo(destination):
             writer = csv.writer(stream)
             writer.writerow(["point_index", "class_id"])
             writer.writerows(enumerate(labels))
+        write_label_source(label_path, filename, len(labels))
         records.append({"path": filename.name, "labels": label_path.name,
                         "split": split, "scene_id": f"SYNTHETIC_scene_{seed}"})
     (destination / "manifest.json").write_text(json.dumps(

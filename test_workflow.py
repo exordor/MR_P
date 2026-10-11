@@ -280,19 +280,21 @@ class WorkflowTest(unittest.TestCase):
         instance = np.zeros(len(original.points), dtype=np.int32)
         instance[selected], instance[other] = 1, 2
         groups = [(64, selected, 0.9), (6, other, 0.8)]
-        # Same version: LAS 1.2 holds classes 0-31 only, so code 64 goes to User Data; 6 fits the class field.
+        # Same version: code 64 goes to an extra field; User Data is preserved.
         dest = self.root / "classified_12.laz"
         info = core.write_classified(source, dest, groups, instance)
         self.assertEqual(info, {"file": "classified_12.laz", "las_version": "1.2", "point_format": 3,
-                                "target_codes_in": "user_data"})
+                                "target_codes_in": "object_class"})
         result = laspy.read(dest)
         codes, user = np.asarray(result.classification), np.asarray(result.user_data)
-        self.assertTrue((codes[selected] == 2).all() and (user[selected] == 64).all())
+        self.assertTrue((codes[selected] == 2).all() and (result.object_class[selected] == 64).all())
+        np.testing.assert_array_equal(user, original.user_data)
         self.assertTrue((codes[other] == 6).all() and (user[other] == 7).all())
         np.testing.assert_array_equal(result.object_instance, instance)
         np.testing.assert_allclose(result.x, original.x)
         # Labels read back from that LAS 1.2 file recover the target codes.
-        labels = core.load_labels(dest, len(codes), {64, 6})
+        labels = core.load_labels(dest, len(codes), {64, 6}, source_xyz=np.asarray(original.xyz),
+                                  label_field="object_class")
         self.assertTrue((labels[selected] == 64).all() and (labels[other] == 6).all())
         self.assertEqual(int((labels > 0).sum()), len(selected) + len(other))
         # LAS 1.4: matching point format, every code in the class field, CRS stored as WKT.
@@ -340,7 +342,7 @@ class WorkflowTest(unittest.TestCase):
         las.classification = codes
         path = self.root / "labels_as_las.laz"
         las.write(path)
-        labels = core.load_labels(path, len(codes), {64})
+        labels = core.load_labels(path, len(codes), {64}, source_xyz=np.asarray(las.xyz))
         np.testing.assert_array_equal(labels, np.where(codes == 64, 64, 0))
         with self.assertRaisesRegex(ValueError, "point count"):
             core.load_labels(path, len(codes) + 1, {64})
@@ -352,6 +354,119 @@ class WorkflowTest(unittest.TestCase):
         path.write_text("point_index,class_id\n0,256\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "0..255"):
             core.load_labels(path, 1, {64})
+
+    def test_las_labels_require_matching_order_and_explicit_user_data(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        las = laspy.read(sample)
+        xyz = np.asarray(las.xyz)
+        las.classification = np.full(len(xyz), 2, dtype=np.uint8)
+        las.user_data = np.full(len(xyz), 64, dtype=np.uint8)
+        path = self.root / "legacy_labels.laz"
+        las.write(path)
+        self.assertFalse(core.load_labels(path, len(xyz), {64}, source_xyz=xyz).any())
+        self.assertTrue((core.load_labels(path, len(xyz), {64}, source_xyz=xyz,
+                                         label_field="user_data") == 64).all())
+        with self.assertRaisesRegex(ValueError, "original point coordinates"):
+            core.load_labels(path, len(xyz), {64})
+        las.points = las.points[::-1].copy()
+        las.write(path)
+        with self.assertRaisesRegex(ValueError, "point order"):
+            core.load_labels(path, len(xyz), {64}, source_xyz=xyz)
+
+    def test_classified_output_can_be_reprocessed_without_losing_attributes(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        las = laspy.read(sample)
+        n = len(las.points)
+        las.user_data = np.arange(n, dtype=np.uint32).astype(np.uint8)
+        las.add_extra_dim(laspy.ExtraBytesParams(name="survey_quality", type=np.float32))
+        las.survey_quality = np.linspace(0, 1, n, dtype=np.float32)
+        source = self.root / "preserve_source.laz"
+        las.write(source)
+        ids = np.zeros(n, dtype=np.uint32)
+        ids[:10] = 1
+        first = self.root / "preserve_first.laz"
+        core.write_classified(source, first, [(64, np.arange(10), .9)], ids)
+        result = laspy.read(first)
+        for name in las.point_format.dimension_names:
+            np.testing.assert_array_equal(result[name], las[name], err_msg=name)
+        # Reprocessing replaces reserved prediction fields, including stale predictions.
+        second = self.root / "preserve_second.laz"
+        core.write_classified(first, second, [], np.zeros(n, dtype=np.uint32))
+        result = laspy.read(second)
+        self.assertFalse(np.asarray(result.object_class).any())
+        self.assertFalse(np.asarray(result.object_instance).any())
+        np.testing.assert_array_equal(result.user_data, las.user_data)
+        np.testing.assert_array_equal(result.survey_quality, las.survey_quality)
+        with self.assertRaises(FileExistsError):
+            core.write_classified(source, source, [], np.zeros(n, dtype=np.uint32))
+        # Exercise the full batch path, not only the writer.
+        run = Path(process_batch([first], self.model, self.root / "rerun", self.cfg, log=lambda _: None))
+        entry = json.loads((run / "run_metadata.json").read_text())["datasets"][0]
+        self.assertTrue(entry["status"].startswith("success"), entry.get("error"))
+
+    def test_export_rejects_field_collisions_and_inconsistent_instances(self):
+        las = laspy.read(self.manifest.parent / "SYNTHETIC_test.laz")
+        n = len(las.points)
+        las.add_extra_dim(laspy.ExtraBytesParams(name="object_instance", type=np.float32))
+        source = self.root / "bad_instance_type.laz"
+        las.write(source)
+        dest = self.root / "bad_export.laz"
+        with self.assertRaisesRegex(ValueError, "incompatible type"):
+            core.write_classified(source, dest, [], np.zeros(n, dtype=np.uint32))
+        self.assertFalse(dest.exists())
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            core.write_classified(source, dest, [(64, np.arange(5), .9)], np.zeros(n, dtype=np.uint32))
+        with self.assertRaisesRegex(ValueError, "overlapping"):
+            core.write_classified(source, dest, [(64, np.arange(5), .9), (65, np.arange(3), .9)],
+                                  np.zeros(n, dtype=np.uint32))
+
+    def test_csv_binding_and_label_fingerprint_are_enforced(self):
+        manifest = create_demo(self.root / "bound_labels")
+        registered = load_manifest(manifest)
+        record = next(r for r in registered["datasets"] if r["split"] == "test")
+        sidecar = Path(record["labels"] + ".source.json")
+        sidecar.unlink()
+        with self.assertRaisesRegex(ValueError, "binding"):
+            load_manifest(manifest)
+        data = json.loads(manifest.read_text())
+        data["datasets"][2]["labels_source_sha256"] = record["sha256"]
+        manifest.write_text(json.dumps(data))
+        load_manifest(manifest)  # An explicitly verified manifest binding is supported.
+        data["datasets"][2]["labels_source_sha256"] = "0" * 64
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "binding"):
+            load_manifest(manifest)
+        # Keep cloud bytes unchanged but alter labels after registration.
+        with Path(record["labels"]).open("a") as stream:
+            stream.write("\n")
+        with self.assertRaisesRegex(ValueError, "Labels changed"):
+            core.collect(registered["datasets"], "test", self.cfg, registered["classes"], lambda _: None)
+
+    def test_truth_rejects_bad_indices_and_source_binding(self):
+        path = self.root / "truth_validation.json"
+        target = {"object_id": "T1", "class_id": 64, "class_name": "target", "center": [0, 0, 0]}
+        def write(objects, digest="a" * 64):
+            path.write_text(json.dumps({"point_count": 10, "source_sha256": digest, "objects": objects}))
+        bad = [{"point_range": [-1, 2]}, {"point_range": [0, 11]}, {"point_range": [4, 3]},
+               {"point_range": [0.5, 2]}, {"point_indices": [-1]}, {"point_indices": [10]},
+               {"point_indices": [1, 1]}, {"point_indices": [True]}, {"point_indices": [1.5]},
+               {"point_indices": [[1]]}, {"point_range": [0, 2], "point_indices": [0]}]
+        for indices in bad:
+            with self.subTest(indices=indices):
+                write([{**target, **indices}])
+                with self.assertRaises(ValueError):
+                    core.load_truth(path, 10, source_sha256="a" * 64)
+        write([{**target, "point_range": [1, 4]}, {**target, "object_id": "T2", "point_indices": [3]}])
+        with self.assertRaisesRegex(ValueError, "overlapping"):
+            core.load_truth(path, 10)
+        write([{**target, "point_range": [0, 1]}, {**target, "point_range": [1, 2]}])
+        with self.assertRaisesRegex(ValueError, "unique"):
+            core.load_truth(path, 10)
+        write([{**target, "point_range": [0, 0]}])  # A physically present but unsampled target is valid.
+        _, ids = core.load_truth(path, 10, source_sha256="a" * 64)
+        self.assertFalse(ids.any())
+        with self.assertRaisesRegex(ValueError, "source_sha256"):
+            core.load_truth(path, 10, source_sha256="b" * 64)
 
     def test_manifest_classes_must_follow_asprs(self):
         source = json.loads(self.manifest.read_text())
@@ -376,7 +491,8 @@ class WorkflowTest(unittest.TestCase):
                     "center": [0, 0, 0], "point_range": [1800 + 140 * (i - 1), 1800 + 140 * i]} for i in (1, 2)]
         targets.append({"object_id": "T3", "class_id": 64, "class_name": "synthetic_object",
                         "center": [0, 0, 0], "point_indices": [0, 1, 2]})
-        core.truth_path(sample).write_text(json.dumps({"point_count": count, "objects": targets}))
+        core.truth_path(sample).write_text(json.dumps({"point_count": count, "source_sha256": core.sha256(sample),
+                                                      "objects": targets}))
         run = Path(process_batch([sample], self.model, self.root / "truth_runs", self.cfg, log=lambda x: None))
         metadata = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))
         result = metadata["datasets"][0]["evaluation"]
