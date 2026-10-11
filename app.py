@@ -11,13 +11,72 @@ import numpy as np
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt, QUrl, Signal
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
-                               QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-                               QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSplitter,
-                               QTableView, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                               QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+                               QPushButton, QSplitter, QTableView, QTableWidget, QTableWidgetItem, QTabWidget,
+                               QVBoxLayout, QWidget)
 
-from core import (Settings, evaluate_model, label_template, process_batch, read_cloud, train_model,
+from core import (Settings, evaluate_model, inspect_file, label_template, process_batch, train_model,
                   write_web_view)
+
+
+def size_text(count):
+    for unit in ("B", "KB", "MB", "GB"):
+        if count < 1024 or unit == "GB":
+            return f"{count:.0f} {unit}" if unit == "B" else f"{count:.1f} {unit}"
+        count /= 1024
+
+
+class InspectDialog(QDialog):
+    """Header summary of every input file; read-only, so it needs no settings."""
+    HEADERS = ["File", "Points", "File size", "Width X m", "Width Y m", "Z min", "Z max", "CRS", "Memory needed",
+               "Check"]
+
+    def __init__(self, summaries, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Input files")
+        layout = QVBoxLayout(self)
+        table = QTableWidget(len(summaries), len(self.HEADERS))
+        table.setHorizontalHeaderLabels(self.HEADERS)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        for row, info in enumerate(summaries):
+            if "error" in info:
+                cells = [info["name"]] + [""] * 8 + [info["error"]]
+            else:
+                (x0, y0, z0), (x1, y1, z1) = info["mins"], info["maxs"]
+                memory = size_text(info["memory_bytes"])
+                if info["ram_bytes"]:
+                    memory += f" of {size_text(info['ram_bytes'])}"
+                cells = [info["name"], f"{info['point_count']:,}", size_text(info["file_bytes"]),
+                         f"{x1 - x0:,.2f}", f"{y1 - y0:,.2f}", f"{z0:,.2f}", f"{z1:,.2f}",
+                         info["crs"] or "none", memory, "; ".join(info["issues"]) or "OK"]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if 1 <= column <= 6:
+                    item.setTextAlignment(int(Qt.AlignRight | Qt.AlignVCenter))
+                if "error" not in info:
+                    item.setToolTip(f"{info['source']}\nLAS {info['las_version']}, point format "
+                                    f"{info['point_format']}\nCRS unit: {info['horizontal_unit'] or 'unknown'}\n"
+                                    f"Fields: {', '.join(info['fields'])}")
+                table.setItem(row, column, item)
+        table.resizeColumnsToContents()
+        table.resizeRowsToContents()
+        frame = table.frameWidth() * 2
+        width = table.verticalHeader().width() + table.horizontalHeader().length() + frame
+        height = (table.horizontalHeader().height() + table.verticalHeader().length() + frame
+                  + table.horizontalScrollBar().sizeHint().height())
+        screen = self.screen().availableGeometry()
+        table.setMinimumSize(min(width, screen.width() - 80), min(height, screen.height() // 2))
+        layout.addWidget(table)
+        note = QLabel("Read from the file headers only. Z units are not stored in LAS; "
+                      "confirm metres in Settings before processing.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class ObjectTable(QAbstractTableModel):
@@ -89,6 +148,7 @@ class App(QMainWindow):
         self.datasets = {}
         self.loaded_page = None
         self.pending_focus = None
+        self.run_metadata = {}
         self.build_ui()
 
     # ---- layout -------------------------------------------------------------
@@ -155,6 +215,17 @@ class App(QMainWindow):
         viewer_controls.addWidget(self.button("Open in browser", self.open_browser_view,
                                               "Open the same 3D view in your web browser, e.g. for a second screen."))
         layout.addLayout(viewer_controls)
+        run_row = QHBoxLayout()
+        self.run_info = QLabel("")
+        self.run_info.setWordWrap(True)
+        self.run_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.run_info.setToolTip("Settings used when these results were produced (not the current Settings).")
+        run_row.addWidget(self.run_info, 1)
+        self.reuse_button = self.button("Use these settings", self.reuse_run_settings,
+                                        "Copy this run's settings and model into the current Settings.")
+        self.reuse_button.setVisible(False)
+        run_row.addWidget(self.reuse_button)
+        layout.addLayout(run_row)
         splitter = QSplitter(Qt.Horizontal)
         self.objects = ObjectTable()
         self.sorted_objects = QSortFilterProxyModel()
@@ -317,8 +388,13 @@ class App(QMainWindow):
         def action():
             if not self.paths:
                 raise ValueError("Add a LAS / LAZ file first")
-            cfg, path = self.settings(), self.paths[0]
-            self.job(lambda: json.dumps(read_cloud(path, cfg)["info"], ensure_ascii=False, indent=2))
+            summaries = []
+            for path in self.paths:
+                try:
+                    summaries.append(inspect_file(path))
+                except Exception as exc:
+                    summaries.append({"name": Path(path).name, "error": f"{type(exc).__name__}: {exc}"})
+            InspectDialog(summaries, self).exec()
         self.safe_action(action)
 
     def process(self):
@@ -392,6 +468,7 @@ class App(QMainWindow):
     def load_run(self, path):
         self.run_path = Path(path)
         metadata = json.loads((self.run_path / "run_metadata.json").read_text(encoding="utf-8"))
+        self.show_run_info(metadata)
         self.datasets = {e["dataset_id"]: e for e in metadata["datasets"] if e["status"].startswith("success")}
         failed = sum(e["status"] == "failed" for e in metadata["datasets"])
         self.log(f"Loaded {len(self.datasets)} datasets, {failed} failed")
@@ -406,6 +483,43 @@ class App(QMainWindow):
             self.objects.load([])
             self.web.setHtml("")
             self.view_note.setText("No datasets to view.")
+
+    def show_run_info(self, metadata):
+        self.run_metadata = metadata
+        cfg = metadata.get("settings", {})
+        model = metadata.get("model_path")
+        model_text = Path(model).name if model else f"model {metadata.get('model_id', '?')[:8]}"
+        started = metadata.get("started_at", "")[:16].replace("T", " ")
+        parts = [started, f"{model_text} ({metadata.get('backend', '?')})"]
+        if cfg:
+            parts += [f"threshold {cfg['threshold']}", f"cluster radius {cfg['cluster_eps']} m",
+                      f"min points {cfg['min_points']}", f"neighbours {cfg['neighbors']}",
+                      f"area {cfg['area_method']}"]
+            if cfg.get("crs_override"):
+                parts.append(f"fallback CRS {cfg['crs_override']}")
+        self.run_info.setText("This run: " + " · ".join(parts))
+        self.reuse_button.setVisible(bool(cfg))
+
+    def reuse_run_settings(self):
+        def action():
+            cfg = self.run_metadata["settings"]
+            self.threshold.setText(str(cfg["threshold"]))
+            self.radius.setText(str(cfg["cluster_eps"]))
+            self.minimum.setText(str(cfg["min_points"]))
+            self.neighbors.setText(str(cfg["neighbors"]))
+            self.limit.setText(str(cfg["max_points"]))
+            self.area.setCurrentText(cfg["area_method"])
+            self.crs.setText(cfg["crs_override"])
+            self.datum.setText(cfg["vertical_datum"])
+            self.meters.setChecked(cfg["coordinates_in_meters"])
+            model = self.run_metadata.get("model_path")
+            if model and Path(model).exists():
+                self.model_path.setText(model)
+                self.log("Copied this run's settings and model.")
+            else:
+                self.log("Copied this run's settings; select its model manually "
+                         f"(model ID {self.run_metadata.get('model_id', '?')}).")
+        self.safe_action(action)
 
     def selected_folder(self):
         if not self.run_path or not self.dataset.currentText():
