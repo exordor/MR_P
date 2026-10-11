@@ -12,11 +12,11 @@ The architecture is fully editable in [diagrams.net](docs/MOST_Software_Architec
 
 ## Installation
 
-Python 3.11 and Tk are required. The Windows python.org installer normally includes Tk. Initial installation downloads the pinned dependencies in `requirements.txt`; processing runs locally afterwards.
+Python 3.11 is required. The interface uses PySide6 (Qt) with an embedded Qt WebEngine 3D view, installed from `requirements.txt` (about 300 MB download). Processing and the 3D view run fully offline afterwards.
 
 On Windows, run `install_windows.cmd`, then `start_windows.cmd`.
 
-On Linux, install Python 3.11, venv and the appropriate Tk package for your distribution, then run:
+On Linux, install Python 3.11 and venv (Qt WebEngine also needs the usual desktop libraries such as `libnss3` and `libxkbcommon`), then run:
 
 ```sh
 sh install_linux.sh
@@ -45,7 +45,7 @@ The demonstration contains no real YellowScan measurements. Its trained model an
 4. Create a dataset manifest using `manifest_example.json`. Separate independent scenes or non-overlapping regions into train, validation and test sets. Use the same `scene_id` for overlapping data; the software checks duplicate paths, identical file content and cross-split scene IDs, but cannot prove that different files do not overlap spatially.
 5. Select the manifest in **Train and Evaluate**, choose a backend and training iterations, and save a new model. Every declared class must appear in the training labels. Validation metrics and model settings are saved alongside the model. Test labels are used only when **Evaluate held-out test set** is clicked.
 6. In **Process and View**, select a trusted trained model, one or more input files, and a results directory. Files run sequentially; a failed file does not stop the remaining batch.
-7. Click **View**, toggle **Show objects**, and select an object ID in the list. Left drag rotates, middle drag pans, and right drag zooms. Saved results can be reopened without rerunning inference or reading the original input file.
+7. The object table (left) lists every detected object; click a heading to sort. The 3D view (right) is part of the window. Click an object in the table to fly to it in 3D, or click a point in 3D to select its object in the table. **Open in browser** shows the same view in a web browser. Saved results can be reopened without rerunning inference or reading the original input file.
 
 ## Outputs and definitions
 
@@ -60,7 +60,7 @@ run_directory/
     D0001/
       report.csv
       objects.json
-      view.npz
+      view3d.html
       status.json
 ```
 
@@ -76,11 +76,11 @@ object ID,x,y,z,Nr_of_points,Intensity,Area,confidence
 - **Area** is blank by default (`unresolved`). An explicitly selected `convex_hull_xy` computes the horizontal convex-hull footprint in square metres. It fills concavities and holes and is not 3D surface area. The method needs project approval before acceptance.
 - **Confidence** is the mean winning-class probability of the points assigned to the final instance. It is uncalibrated and is not measured detection accuracy.
 
-Processing and CSV export use original points without downsampling. New display caches contain at most 30,000 deterministically sampled original points, preserving an example of each detected instance where the budget permits. The viewer offers 1,000, 5,000, 10,000 or 30,000 display points; click Apply after choosing. Display sampling does not change inference, object coordinates, reports or CSV exports. Oversized legacy caches are rejected before decompression and must be regenerated. Object IDs match across the report, object files and viewer cache. Source mapping is retained through per-dataset reports and metadata. CSV is UTF-8 with a BOM; missing values use blank cells and JSON nulls.
+Processing and CSV export use original points without downsampling. Each processed file also gets `view3d.html`, an offline page that draws up to 3,000,000 points with the GPU (WebGL); object points get at least half of that budget. It is shown inside the application (and can be opened in a browser). Drag to rotate, right-drag to pan, scroll to zoom, click a point to identify its object, or type an object ID to jump to it. Measured on Devil's Bridge: 3 M points render in about 3–5 ms per frame. The page is about 22 bytes per shown point, so up to about 66 MB. Display sampling does not change inference, object coordinates, reports or CSV exports. Results saved by earlier versions (with `view.npz`) still open; their 3D view shows the 30,000 cached points. Object IDs match across the report, object files and 3D view. Source mapping is retained through per-dataset reports and metadata. CSV is UTF-8 with a BOM; missing values use blank cells and JSON nulls.
 
 ## Scope and limits
 
-The default limit is 500,000 points per input file and per labelled split. The settings permit up to 2,000,000, but that scale has not been benchmarked. Oversized inputs fail explicitly. Dense clustering neighbourhoods are also rejected to bound memory usage.
+By default there is no point limit (Max points / file = 0): every point of every file is processed. A positive value restores an explicit per-file and per-labelled-split cap. A file is refused before decoding only if its estimated memory (about 600 bytes per point) exceeds 80% of physical RAM; split such files by area first. Feature extraction, classification and clustering use all CPU cores. Clustering is a chunked DBSCAN whose memory is bounded by chunk size; core points and clusters match scikit-learn's DBSCAN, and each border point joins the cluster of its nearest core point. Measured on a 10-core, 64 GB Mac with a 100-tree random forest: 7.3 M points (Devil's Bridge LAZ) 33 s, 7.5 M points (Barsebäck LAS) under 32 s, 14.7 M points (Saint-Bauzille LAS) 81 s, peak memory 2.7–5.5 GB.
 
 The MLP is a three-hidden-layer network on engineered features (64/64/32), not an end-to-end PointNet or Pointcept model. Local height uses the neighbourhood Z 10th percentile, not a reconstructed seabed. DBSCAN can merge nearby same-class objects or split sparse objects. Each file is clustered globally, avoiding within-file tile seams; overlapping input files are not reconciled with each other.
 

@@ -1,265 +1,317 @@
-"""Tk desktop UI; long-running operations stay off the UI thread."""
+"""PySide6 desktop UI with an embedded WebGL 3D view; long-running operations stay off the UI thread."""
 from __future__ import annotations
 
 import json
-import os
-import queue
 import sys
 import threading
-import tkinter as tk
-import zipfile
-from dataclasses import asdict
+import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.figure import Figure
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt, QUrl, Signal
+from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
+                               QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+                               QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSplitter,
+                               QTableView, QTabWidget, QVBoxLayout, QWidget)
 
-from core import (DISPLAY_LIMIT, Settings, display_indices, evaluate_model, label_template, process_batch,
-                  read_cloud, train_model)
-
-
-def tooltip(widget, text):
-    """Show text in a small popup while the pointer is over widget."""
-    tip = None
-
-    def show(event):
-        nonlocal tip
-        tip = tk.Toplevel(widget)
-        tip.wm_overrideredirect(True)
-        tip.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
-        ttk.Label(tip, text=text, background="#ffffe0", relief="solid", borderwidth=1,
-                  padding=4, justify="left").pack()
-
-    def hide(event):
-        nonlocal tip
-        if tip:
-            tip.destroy()
-            tip = None
-    widget.bind("<Enter>", show)
-    widget.bind("<Leave>", hide)
+from core import (Settings, evaluate_model, label_template, process_batch, read_cloud, train_model,
+                  write_web_view)
 
 
-def use_bundled_tcl_tk():
-    """Point Tk at the interpreter's own Tcl/Tk scripts when a venv hides them (e.g. uv-installed Python)."""
-    lib = Path(sys.base_prefix) / "lib"
-    for var, folder, script in (("TCL_LIBRARY", "tcl8.6", "init.tcl"), ("TK_LIBRARY", "tk8.6", "tk.tcl")):
-        if var not in os.environ and (lib / folder / script).is_file():
-            os.environ[var] = str(lib / folder)
+class ObjectTable(QAbstractTableModel):
+    """Detected objects; numbers stay numeric so column sorting is numeric."""
+    HEADERS = ["Object ID", "Class", "Points", "Confidence", "X", "Y", "Z"]
 
-
-class App(tk.Tk):
     def __init__(self):
-        use_bundled_tcl_tk()
         super().__init__()
-        self.title("Object Detection")
-        height = min(1050, self.winfo_screenheight() - 80)
-        self.geometry(f"1320x{height}")
-        self.minsize(1200, min(700, height))
-        self.events = queue.Queue()
+        self.rows = []
+
+    def load(self, objects):
+        self.beginResetModel()
+        self.rows = [(o["object_id"], o["class_name"], o["point_count"], o["confidence"], *o["centroid"])
+                     for o in objects]
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self.HEADERS)
+
+    def data(self, index, role=Qt.DisplayRole):
+        value = self.rows[index.row()][index.column()]
+        column = index.column()
+        if role == Qt.DisplayRole:
+            if column == 2:
+                return f"{value:,}"
+            return f"{value:.3f}" if column >= 3 else value
+        if role == Qt.UserRole:  # Sort key.
+            return value
+        if role == Qt.TextAlignmentRole and column >= 2:
+            return int(Qt.AlignRight | Qt.AlignVCenter)
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return None
+
+
+class ViewerPage(QWebEnginePage):
+    """Forwards 'PICK <object id>' console messages from the 3D page to the window."""
+
+    def __init__(self, on_pick, parent=None):
+        super().__init__(parent)
+        self.on_pick = on_pick
+
+    def javaScriptConsoleMessage(self, level, message, line, source):
+        if message.startswith("PICK "):
+            self.on_pick(message[5:])
+
+
+class Bridge(QObject):
+    """Carries worker-thread events to the UI thread (queued signal)."""
+    event = Signal(str, object)
+
+
+class App(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Object Detection")
+        self.resize(1400, 950)
+        self.bridge = Bridge()
+        self.bridge.event.connect(self.handle_event)
         self.busy = False
         self.paths = []
         self.run_path = None
-        self.current_data = None
-        self.selected_object = None
-        self.show_objects = tk.BooleanVar(value=False)
-        self.meters = tk.BooleanVar(value=False)
-        self.model_path = tk.StringVar()
-        self.manifest_path = tk.StringVar()
-        self.output_path = tk.StringVar(value=str((Path.cwd() / "results").resolve()))
-        self.crs = tk.StringVar()
-        self.datum = tk.StringVar(value="unspecified")
-        self.threshold = tk.StringVar(value="0.7")
-        self.radius = tk.StringVar(value="0.3")
-        self.minimum = tk.StringVar(value="10")
-        self.neighbors = tk.StringVar(value="20")
-        self.limit = tk.StringVar(value="500000")
-        self.backend = tk.StringVar(value="random_forest")
-        self.iterations = tk.StringVar(value="100")
-        self.display_limit = tk.StringVar(value=str(DISPLAY_LIMIT))
-        self.area = tk.StringVar(value="unresolved")
+        self.datasets = {}
+        self.loaded_page = None
+        self.pending_focus = None
         self.build_ui()
-        self.after(100, self.poll)
-        self.protocol("WM_DELETE_WINDOW", self.close_app)
 
+    # ---- layout -------------------------------------------------------------
     def build_ui(self):
-        top = ttk.Frame(self, padding=12)
-        top.pack(fill="x")
-        ttk.Label(top, text="Object Detection", font=("Arial", 17, "bold")).pack(anchor="w")
-        notebooks = ttk.Notebook(self)
-        notebooks.pack(fill="both", expand=True, padx=12)
-        processing, training = ttk.Frame(notebooks, padding=10), ttk.Frame(notebooks, padding=10)
-        notebooks.add(processing, text="Process and View")
-        notebooks.add(training, text="Train and Evaluate")
-        self.path_row(processing, "Model", self.model_path, self.pick_model, 0)
-        self.path_row(processing, "Results directory", self.output_path, self.pick_output, 1)
-        controls = ttk.Frame(processing)
-        controls.grid(row=2, column=0, columnspan=3, sticky="ew", pady=6)
-        ttk.Button(controls, text="Add LAS / LAZ", command=self.add_files).pack(side="left")
-        ttk.Button(controls, text="Clear list", command=self.clear_files).pack(side="left", padx=5)
-        ttk.Button(controls, text="Inspect input", command=self.inspect).pack(side="left", padx=5)
-        ttk.Button(controls, text="Process", command=self.process).pack(side="left", padx=5)
-        ttk.Button(controls, text="Open saved results", command=self.open_run).pack(side="left", padx=5)
-        ttk.Button(controls, text="Synthetic demo", command=self.open_demo).pack(side="left", padx=5)
-        self.inputs = tk.Listbox(processing, height=3, exportselection=False)
-        self.inputs.grid(row=3, column=0, columnspan=3, sticky="ew")
-        viewer_controls = ttk.Frame(processing)
-        viewer_controls.grid(row=4, column=0, columnspan=3, sticky="ew", pady=6)
-        self.dataset = ttk.Combobox(viewer_controls, state="readonly", width=45)
-        self.dataset.pack(side="left")
-        ttk.Button(viewer_controls, text="View", command=self.view).pack(side="left", padx=8)
-        ttk.Checkbutton(viewer_controls, text="Show objects", variable=self.show_objects,
-                        command=self.redraw).pack(side="left")
-        ttk.Label(viewer_controls, text="Display points").pack(side="left", padx=(12, 4))
-        ttk.Combobox(viewer_controls, textvariable=self.display_limit,
-                     values=["1000", "5000", "10000", "30000"], state="readonly", width=8).pack(side="left")
-        ttk.Button(viewer_controls, text="Apply", command=self.view).pack(side="left", padx=4)
-        self.view_note = ttk.Label(processing, text="")
-        self.view_note.grid(row=5, column=0, columnspan=3, sticky="w")
-        body = ttk.Frame(processing)
-        body.grid(row=6, column=0, columnspan=3, sticky="nsew")
-        self.figure = Figure(figsize=(7, 4), dpi=100)
-        self.canvas = FigureCanvasTkAgg(self.figure, master=body)
-        self.canvas.get_tk_widget().pack(side="left", fill="both", expand=True)
-        self.object_list = tk.Listbox(body, width=28, exportselection=False)
-        self.object_list.pack(side="right", fill="y")
-        self.object_list.bind("<<ListboxSelect>>", self.select_object)
-        toolbar_frame = ttk.Frame(processing)
-        toolbar_frame.grid(row=7, column=0, columnspan=3, sticky="ew")
-        NavigationToolbar2Tk(self.canvas, toolbar_frame)
-        processing.columnconfigure(1, weight=1)
-        processing.rowconfigure(6, weight=1)
-        self.path_row(training, "Dataset manifest JSON", self.manifest_path, self.pick_manifest, 0)
-        labels_hint = ttk.Label(training, text="Labels: point_index,class_id  (0 = background, -1 = unlabelled)")
-        labels_hint.grid(row=1, column=0, columnspan=3, sticky="w", pady=15)
-        tooltip(labels_hint, "One row per labelled point; positive IDs are target classes.\n"
-                             "Train, validation and test must come from different scenes.")
-        row = ttk.Frame(training)
-        row.grid(row=2, column=0, columnspan=3, sticky="w")
-        ttk.Label(row, text="Method").pack(side="left")
-        method = ttk.Combobox(row, textvariable=self.backend, values=["random_forest", "mlp"], state="readonly", width=20)
-        method.pack(side="left", padx=5)
-        iterations_label = ttk.Label(row, text="Trees")
-        iterations_label.pack(side="left", padx=8)
-        method.bind("<<ComboboxSelected>>", lambda e: iterations_label.configure(
-            text="Trees" if self.backend.get() == "random_forest" else "Max epochs"))
-        ttk.Entry(row, textvariable=self.iterations, width=8).pack(side="left")
-        buttons = ttk.Frame(training)
-        buttons.grid(row=3, column=0, columnspan=3, sticky="w", pady=12)
-        ttk.Button(buttons, text="Create label template", command=self.make_labels).pack(side="left")
-        ttk.Button(buttons, text="Train and save model", command=self.train).pack(side="left", padx=8)
-        ttk.Button(buttons, text="Evaluate on test set", command=self.evaluate).pack(side="left", padx=8)
-        training.columnconfigure(1, weight=1)
-        settings = ttk.LabelFrame(self, text="Settings", padding=8)
-        # Docked to the bottom before the notebook, so a short window shrinks the plot instead of hiding these.
-        settings.pack(side="bottom", fill="x", padx=12, pady=8, before=notebooks)
-        self.field(settings, "Fallback CRS", self.crs, 0, 0, 18)
-        self.field(settings, "Vertical datum", self.datum, 0, 2, 18)
-        ttk.Checkbutton(settings, text="X/Y/Z in metres", variable=self.meters).grid(row=0, column=4, columnspan=4, sticky="w")
-        self.field(settings, "Score threshold", self.threshold, 1, 0, 8)
-        self.field(settings, "Cluster radius m", self.radius, 1, 2, 8)
-        self.field(settings, "Min object points", self.minimum, 1, 4, 8)
-        ttk.Label(settings, text="Area method").grid(row=1, column=6, padx=6)
-        area = ttk.Combobox(settings, textvariable=self.area, values=["unresolved", "convex_hull_xy"], state="readonly", width=19)
-        area.grid(row=1, column=7)
-        tooltip(area, "unresolved: leave Area blank\nconvex_hull_xy: area of the XY convex hull")
-        self.field(settings, "Neighbours", self.neighbors, 2, 0, 8)
-        self.field(settings, "Max points / file", self.limit, 2, 2, 10)
-        self.log_box = tk.Text(self, height=5, state="disabled", wrap="word")
-        self.log_box.pack(side="bottom", fill="x", padx=12, before=settings)
-        self.progress = ttk.Progressbar(self, mode="indeterminate")
-        self.progress.pack(side="bottom", fill="x", padx=12, pady=6, before=self.log_box)
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        title = QLabel("Object Detection")
+        title.setStyleSheet("font-size: 17pt; font-weight: bold;")
+        layout.addWidget(title)
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
+        tabs.addTab(self.build_processing(), "Process and View")
+        tabs.addTab(self.build_training(), "Train and Evaluate")
+        layout.addWidget(self.build_settings())
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        layout.addWidget(self.progress)
+        self.log_box = QPlainTextEdit(readOnly=True)
+        self.log_box.setFixedHeight(90)
+        layout.addWidget(self.log_box)
+        self.setCentralWidget(central)
 
-    @staticmethod
-    def field(parent, title, variable, row, col, width):
-        ttk.Label(parent, text=title).grid(row=row, column=col, sticky="w", padx=4, pady=3)
-        ttk.Entry(parent, textvariable=variable, width=width).grid(row=row, column=col + 1, sticky="w")
+    def path_row(self, grid, row, title, edit, command):
+        grid.addWidget(QLabel(title), row, 0)
+        grid.addWidget(edit, row, 1)
+        button = QPushButton("Browse")
+        button.clicked.connect(command)
+        grid.addWidget(button, row, 2)
 
-    @staticmethod
-    def path_row(parent, title, variable, command, row):
-        ttk.Label(parent, text=title).grid(row=row, column=0, sticky="w", padx=(0, 10))
-        ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew")
-        ttk.Button(parent, text="Browse", command=command).grid(row=row, column=2, padx=5)
+    def button(self, text, command, tip=None):
+        button = QPushButton(text)
+        button.clicked.connect(command)
+        if tip:
+            button.setToolTip(tip)
+        return button
 
+    def build_processing(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        grid = QGridLayout()
+        self.model_path = QLineEdit()
+        self.output_path = QLineEdit(str((Path.cwd() / "results").resolve()))
+        self.path_row(grid, 0, "Model", self.model_path, self.pick_model)
+        self.path_row(grid, 1, "Results directory", self.output_path, self.pick_output)
+        layout.addLayout(grid)
+        controls = QHBoxLayout()
+        for text, command in (("Add LAS / LAZ", self.add_files), ("Clear list", self.clear_files),
+                              ("Inspect input", self.inspect), ("Process", self.process),
+                              ("Open saved results", self.open_run), ("Synthetic demo", self.open_demo)):
+            controls.addWidget(self.button(text, command))
+        controls.addStretch()
+        layout.addLayout(controls)
+        self.inputs = QListWidget()
+        self.inputs.setFixedHeight(60)
+        layout.addWidget(self.inputs)
+        viewer_controls = QHBoxLayout()
+        self.dataset = QComboBox()
+        self.dataset.setMinimumWidth(380)
+        self.dataset.currentIndexChanged.connect(lambda _: self.view())
+        viewer_controls.addWidget(self.dataset)
+        self.view_note = QLabel("")
+        viewer_controls.addWidget(self.view_note)
+        viewer_controls.addStretch()
+        viewer_controls.addWidget(self.button("Open in browser", self.open_browser_view,
+                                              "Open the same 3D view in your web browser, e.g. for a second screen."))
+        layout.addLayout(viewer_controls)
+        splitter = QSplitter(Qt.Horizontal)
+        self.objects = ObjectTable()
+        self.sorted_objects = QSortFilterProxyModel()
+        self.sorted_objects.setSourceModel(self.objects)
+        self.sorted_objects.setSortRole(Qt.UserRole)
+        self.table = QTableView()
+        self.table.setModel(self.sorted_objects)
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(-1, Qt.AscendingOrder)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.setToolTip("Click an object to show it in the 3D view. Click a heading to sort.")
+        self.table.selectionModel().currentRowChanged.connect(self.table_selected)
+        splitter.addWidget(self.table)
+        self.web = QWebEngineView()
+        # Keep a Python reference: Qt calls the overridden method, so the wrapper must outlive the view.
+        self.viewer_page = ViewerPage(self.picked_in_view, self.web)
+        self.web.setPage(self.viewer_page)
+        self.web.loadFinished.connect(self.page_loaded)
+        splitter.addWidget(self.web)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 5)
+        splitter.setSizes([380, 1000])
+        layout.addWidget(splitter, 1)
+        return page
+
+    def build_training(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        grid = QGridLayout()
+        self.manifest_path = QLineEdit()
+        self.path_row(grid, 0, "Dataset manifest JSON", self.manifest_path, self.pick_manifest)
+        layout.addLayout(grid)
+        hint = QLabel("Labels: point_index,class_id  (0 = background, -1 = unlabelled)")
+        hint.setToolTip("One row per labelled point; positive IDs are target classes.\n"
+                        "Train, validation and test must come from different scenes.")
+        layout.addWidget(hint)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Method"))
+        self.backend = QComboBox()
+        self.backend.addItems(["random_forest", "mlp"])
+        row.addWidget(self.backend)
+        iterations_label = QLabel("Trees")
+        self.backend.currentTextChanged.connect(
+            lambda text: iterations_label.setText("Trees" if text == "random_forest" else "Max epochs"))
+        row.addWidget(iterations_label)
+        self.iterations = QLineEdit("100")
+        self.iterations.setFixedWidth(70)
+        row.addWidget(self.iterations)
+        row.addStretch()
+        layout.addLayout(row)
+        buttons = QHBoxLayout()
+        for text, command in (("Create label template", self.make_labels), ("Train and save model", self.train),
+                              ("Evaluate on test set", self.evaluate)):
+            buttons.addWidget(self.button(text, command))
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        layout.addStretch()
+        return page
+
+    def build_settings(self):
+        box = QGroupBox("Settings")
+        grid = QGridLayout(box)
+        self.crs, self.datum = QLineEdit(), QLineEdit("unspecified")
+        self.meters = QCheckBox("X/Y/Z in metres")
+        self.threshold, self.radius, self.minimum = QLineEdit("0.7"), QLineEdit("0.3"), QLineEdit("10")
+        self.neighbors, self.limit = QLineEdit("20"), QLineEdit("0")
+        self.limit.setToolTip("0 = no limit: the whole file is processed.\n"
+                              "Very large files are refused only if they would not fit in memory.")
+        self.area = QComboBox()
+        self.area.addItems(["unresolved", "convex_hull_xy"])
+        self.area.setToolTip("unresolved: leave Area blank\nconvex_hull_xy: area of the XY convex hull")
+        fields = [[("Fallback CRS", self.crs), ("Vertical datum", self.datum), (None, self.meters)],
+                  [("Score threshold", self.threshold), ("Cluster radius m", self.radius),
+                   ("Min object points", self.minimum), ("Area method", self.area)],
+                  [("Neighbours", self.neighbors), ("Max points / file", self.limit)]]
+        for row, items in enumerate(fields):
+            for col, (title, widget) in enumerate(items):
+                if title:
+                    grid.addWidget(QLabel(title), row, col * 2)
+                grid.addWidget(widget, row, col * 2 + 1)
+        grid.setColumnStretch(8, 1)
+        return box
+
+    # ---- tasks ----------------------------------------------------------------
     def settings(self):
-        return Settings(neighbors=int(self.neighbors.get()), max_points=int(self.limit.get()),
-                        threshold=float(self.threshold.get()), cluster_eps=float(self.radius.get()),
-                        min_points=int(self.minimum.get()), area_method=self.area.get(),
-                        crs_override=self.crs.get().strip(), coordinates_in_meters=self.meters.get(),
-                        vertical_datum=self.datum.get().strip())
+        return Settings(neighbors=int(self.neighbors.text()), max_points=int(self.limit.text()),
+                        threshold=float(self.threshold.text()), cluster_eps=float(self.radius.text()),
+                        min_points=int(self.minimum.text()), area_method=self.area.currentText(),
+                        crs_override=self.crs.text().strip(), coordinates_in_meters=self.meters.isChecked(),
+                        vertical_datum=self.datum.text().strip())
 
     def log(self, message):
-        self.events.put(("log", str(message)))
+        """Thread-safe: may be called from the worker thread."""
+        self.bridge.event.emit("log", str(message))
 
     def job(self, fn, callback=None):
         if self.busy:
-            messagebox.showinfo("Processing", "A task is already running.")
+            QMessageBox.information(self, "Processing", "A task is already running.")
             return
         self.busy = True
-        self.progress.start()
+        self.progress.setRange(0, 0)  # Busy indicator.
         def work():
             try:
-                result = fn()
-                self.events.put(("done", (result, callback)))
+                self.bridge.event.emit("done", (fn(), callback))
             except Exception as exc:
-                self.events.put(("error", f"{type(exc).__name__}: {exc}"))
+                self.bridge.event.emit("error", f"{type(exc).__name__}: {exc}")
         threading.Thread(target=work, daemon=True).start()
 
-    def poll(self):
-        try:
-            while True:
-                kind, value = self.events.get_nowait()
-                if kind == "log":
-                    self.log_box.configure(state="normal")
-                    self.log_box.insert("end", value + "\n")
-                    self.log_box.see("end")
-                    self.log_box.configure(state="disabled")
-                else:
-                    self.busy = False
-                    self.progress.stop()
-                    if kind == "error":
-                        self.log(value)
-                        messagebox.showerror("Task failed", value)
-                    else:
-                        result, callback = value
-                        self.log(f"Completed: {result}")
-                        if callback:
-                            callback(result)
-        except queue.Empty:
-            pass
-        self.after(100, self.poll)
-
-    def pick_model(self):
-        path = filedialog.askopenfilename(filetypes=[("Model", "*.joblib")])
-        if path:
-            self.model_path.set(path)
-
-    def pick_output(self):
-        path = filedialog.askdirectory()
-        if path:
-            self.output_path.set(path)
-
-    def pick_manifest(self):
-        path = filedialog.askopenfilename(filetypes=[("Dataset manifest", "*.json")])
-        if path:
-            self.manifest_path.set(path)
-
-    def add_files(self):
-        for path in filedialog.askopenfilenames(filetypes=[("Point clouds", "*.las *.laz")]):
-            if path not in self.paths:
-                self.paths.append(path)
-                self.inputs.insert("end", path)
-
-    def clear_files(self):
-        self.paths = []
-        self.inputs.delete(0, "end")
+    def handle_event(self, kind, value):
+        if kind == "log":
+            self.log_box.appendPlainText(value)
+            return
+        self.busy = False
+        self.progress.setRange(0, 1)
+        if kind == "error":
+            self.log_box.appendPlainText(value)
+            QMessageBox.critical(self, "Task failed", value)
+        else:
+            result, callback = value
+            self.log_box.appendPlainText(f"Completed: {result}")
+            if callback:
+                self.safe_action(lambda: callback(result))
 
     def safe_action(self, action):
         try:
             action()
         except Exception as exc:
-            messagebox.showerror("Invalid settings", str(exc))
+            QMessageBox.critical(self, "Invalid settings", str(exc))
+
+    def pick_model(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Model", "", "Model (*.joblib)")
+        if path:
+            self.model_path.setText(path)
+
+    def pick_output(self):
+        path = QFileDialog.getExistingDirectory(self, "Results directory")
+        if path:
+            self.output_path.setText(path)
+
+    def pick_manifest(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Dataset manifest", "", "Dataset manifest (*.json)")
+        if path:
+            self.manifest_path.setText(path)
+
+    def add_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Point clouds", "", "Point clouds (*.las *.laz)")
+        for path in paths:
+            if path not in self.paths:
+                self.paths.append(path)
+                self.inputs.addItem(path)
+
+    def clear_files(self):
+        self.paths = []
+        self.inputs.clear()
 
     def inspect(self):
         def action():
@@ -271,7 +323,8 @@ class App(tk.Tk):
 
     def process(self):
         def action():
-            cfg, paths, model, output = self.settings(), self.paths.copy(), self.model_path.get(), self.output_path.get()
+            cfg, paths = self.settings(), self.paths.copy()
+            model, output = self.model_path.text(), self.output_path.text()
             if not model or not paths or not output:
                 raise ValueError("Select input files, a model and a results directory")
             self.job(lambda: process_batch(paths, model, output, cfg, self.log), self.load_run)
@@ -279,38 +332,43 @@ class App(tk.Tk):
 
     def train(self):
         def action():
-            cfg, manifest = self.settings(), self.manifest_path.get()
-            backend, iterations = self.backend.get(), int(self.iterations.get())
+            cfg, manifest = self.settings(), self.manifest_path.text()
+            backend, iterations = self.backend.currentText(), int(self.iterations.text())
             if not manifest:
                 raise ValueError("Select a dataset manifest JSON")
-            dest = filedialog.asksaveasfilename(defaultextension=".joblib", filetypes=[("Trained model", "*.joblib")])
+            dest, _ = QFileDialog.getSaveFileName(self, "Trained model", "", "Trained model (*.joblib)")
             if dest:
-                self.job(lambda: train_model(manifest, dest, cfg, backend, iterations, self.log), self.model_path.set)
+                dest = dest if dest.endswith(".joblib") else dest + ".joblib"
+                self.job(lambda: train_model(manifest, dest, cfg, backend, iterations, self.log),
+                         self.model_path.setText)
         self.safe_action(action)
 
     def evaluate(self):
         def action():
-            cfg, model = self.settings(), self.model_path.get()
+            cfg, model = self.settings(), self.model_path.text()
             if not model:
                 raise ValueError("Select a model")
-            dest = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Evaluation", "*.json")])
+            dest, _ = QFileDialog.getSaveFileName(self, "Evaluation", "", "Evaluation (*.json)")
             if dest:
+                dest = dest if dest.endswith(".json") else dest + ".json"
                 self.job(lambda: evaluate_model(model, dest, cfg, self.log))
         self.safe_action(action)
 
     def make_labels(self):
         def action():
-            path = filedialog.askopenfilename(filetypes=[("Point cloud", "*.las *.laz")])
+            path, _ = QFileDialog.getOpenFileName(self, "Point cloud", "", "Point cloud (*.las *.laz)")
             if not path:
                 return
             cfg = self.settings()
-            dest = filedialog.asksaveasfilename(defaultextension=".csv", initialfile=Path(path).stem + ".labels.csv")
+            dest, _ = QFileDialog.getSaveFileName(self, "Label template", Path(path).stem + ".labels.csv",
+                                                  "CSV (*.csv)")
             if dest:
                 self.job(lambda: (label_template(path, dest, cfg), dest)[1])
         self.safe_action(action)
 
+    # ---- results and 3D view -----------------------------------------------------
     def open_run(self):
-        path = filedialog.askdirectory(title="Select a results directory containing run_metadata.json")
+        path = QFileDialog.getExistingDirectory(self, "Select a results directory containing run_metadata.json")
         if path:
             self.safe_action(lambda: self.load_run(path))
 
@@ -320,16 +378,14 @@ class App(tk.Tk):
             candidates = sorted((demo / "results").glob("*/run_metadata.json"))
             if not candidates:
                 raise ValueError("Synthetic demo missing; follow README to generate it.")
-            self.model_path.set(str(demo / "SYNTHETIC_MODEL.joblib"))
-            self.meters.set(True)
-            self.datum.set("synthetic_local_z")
-            self.area.set("convex_hull_xy")
+            self.model_path.setText(str(demo / "SYNTHETIC_MODEL.joblib"))
+            self.meters.setChecked(True)
+            self.datum.setText("synthetic_local_z")
+            self.area.setCurrentText("convex_hull_xy")
             self.clear_files()
             self.paths = [str(demo / "SYNTHETIC_test.laz")]
-            self.inputs.insert("end", self.paths[0])
+            self.inputs.addItem(self.paths[0])
             self.load_run(candidates[-1].parent)
-            self.show_objects.set(True)
-            self.view()
             self.log("Loaded synthetic demo.")
         self.safe_action(action)
 
@@ -337,98 +393,95 @@ class App(tk.Tk):
         self.run_path = Path(path)
         metadata = json.loads((self.run_path / "run_metadata.json").read_text(encoding="utf-8"))
         self.datasets = {e["dataset_id"]: e for e in metadata["datasets"] if e["status"].startswith("success")}
-        self.dataset["values"] = [f"{key} | {Path(e['source']).name}" for key, e in self.datasets.items()]
-        self.current_data = None
-        self.figure.clear()
-        self.canvas.draw_idle()
-        self.object_list.delete(0, "end")
         failed = sum(e["status"] == "failed" for e in metadata["datasets"])
         self.log(f"Loaded {len(self.datasets)} datasets, {failed} failed")
+        self.loaded_page = None
+        self.dataset.blockSignals(True)
+        self.dataset.clear()
+        self.dataset.addItems([f"{key} | {Path(e['source']).name}" for key, e in self.datasets.items()])
+        self.dataset.blockSignals(False)
         if self.datasets:
-            self.dataset.current(0)
+            self.view()
         else:
-            self.dataset.set("")
-            self.view_note.configure(text="No datasets to view.")
+            self.objects.load([])
+            self.web.setHtml("")
+            self.view_note.setText("No datasets to view.")
+
+    def selected_folder(self):
+        if not self.run_path or not self.dataset.currentText():
+            raise ValueError("Process a dataset or open saved results first")
+        key = self.dataset.currentText().split(" | ", 1)[0]
+        return key, self.run_path / self.datasets[key]["result_path"]
+
+    def view_page(self, key, folder):
+        page = folder / "view3d.html"
+        if not page.exists():  # Results saved before the 3D page existed: build it from the display cache.
+            objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
+            with np.load(folder / "view.npz", allow_pickle=False) as data:
+                write_web_view(page, Path(self.datasets[key]["source"]).name, data["xyz"], data["instance"],
+                               objects, data["origin"], int(data["total_points"]))
+        return page
 
     def view(self):
         def action():
-            if not self.run_path or not self.dataset.get():
-                raise ValueError("Process a dataset or open saved results first")
-            key = self.dataset.get().split(" | ", 1)[0]
-            folder = self.run_path / self.datasets[key]["result_path"]
-            self.current_objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
-            cache = folder / "view.npz"
-            # Reject oversized legacy caches before decompressing full arrays.
-            with zipfile.ZipFile(cache) as archive:
-                if sum(item.file_size for item in archive.infolist()) > 32 * 1024 * 1024:
-                    raise ValueError("Saved display cache is too large. Reprocess with this version to create a downsampled cache.")
-            with np.load(cache, allow_pickle=False) as data:
-                xyz, instance = data["xyz"], data["instance"]
-                indices = display_indices(instance, int(self.display_limit.get()))
-                origin = data["origin"] if "origin" in data else xyz.mean(axis=0)
-                total = int(data["total_points"]) if "total_points" in data else len(xyz)
-                self.current_data = (xyz[indices], instance[indices], origin)
-            self.selected_object = None
-            self.object_list.delete(0, "end")
-            for obj in self.current_objects:
-                self.object_list.insert("end", f"{obj['object_id']} ({obj['class_name']})")
-            self.view_note.configure(text=f"{len(indices):,} / {total:,} points shown · {len(self.current_objects)} objects")
-            self.redraw()
+            key, folder = self.selected_folder()
+            self.objects.load(json.loads((folder / "objects.json").read_text(encoding="utf-8")))
+            total = self.datasets[key].get("input", {}).get("point_count")
+            points = f"{total:,} points · " if total else ""
+            self.view_note.setText(f"{points}{self.objects.rowCount():,} objects")
+            page = self.view_page(key, folder)
+            if page != self.loaded_page:
+                self.loaded_page = page
+                self.pending_focus = None
+                # Loaded by URL: setHtml() is limited to 2 MB and the page can be tens of MB.
+                self.web.load(QUrl.fromLocalFile(str(page.resolve())))
         self.safe_action(action)
 
-    def select_object(self, event=None):
-        selection = self.object_list.curselection()
-        if selection:
-            obj = self.current_objects[selection[0]]
-            self.selected_object = obj["instance_index"]
-            self.show_objects.set(True)
-            self.log(f"{obj['object_id']}: {obj['point_count']} points, confidence={obj['confidence']:.3f}")
-            self.redraw()
+    def page_loaded(self, ok):
+        if ok and self.pending_focus:
+            self.focus_in_view(self.pending_focus)
 
-    def redraw(self):
-        if self.current_data is None:
-            return
-        xyz, instance, origin = self.current_data
-        local = xyz - origin
-        camera = None
-        if self.figure.axes:
-            old = self.figure.axes[0]
-            camera = (old.elev, old.azim, old.roll)
-        self.figure.clear()
-        ax = self.figure.add_subplot(111, projection="3d")
-        ax.mouse_init(rotate_btn=1, pan_btn=2, zoom_btn=3)
-        if camera is not None:
-            ax.view_init(*camera)
-        colors = np.tile([0.58, 0.62, 0.67, 0.28], (len(xyz), 1))
-        if self.show_objects.get():
-            from matplotlib import colormaps
-            for obj in self.current_objects:
-                idx = obj["instance_index"]
-                # Golden-angle hues keep distinct colours beyond the first 20 objects.
-                color = colormaps["hsv"]((idx * 0.61803398875) % 1)
-                colors[instance == idx] = color
-            if self.selected_object:
-                colors[(instance > 0) & (instance != self.selected_object), 3] = 0.18
-        ax.scatter(*local.T, c=colors, s=3, depthshade=False)
-        span = np.ptp(local, axis=0)
-        ax.set_box_aspect(np.maximum(span, 0.1))
-        ax.set(xlabel="X relative (m)", ylabel="Y relative (m)", zlabel="Z relative (m)")
-        from matplotlib.ticker import MaxNLocator
-        ax.zaxis.set_major_locator(MaxNLocator(nbins=2))
-        ax.tick_params(labelsize=8, pad=1)
-        if self.selected_object and self.show_objects.get():
-            obj = next(o for o in self.current_objects if o["instance_index"] == self.selected_object)
-            center = np.asarray(obj["centroid"]) - origin
-            ax.text(*center, obj["object_id"], fontsize=8)
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
+    def focus_in_view(self, object_id):
+        self.pending_focus = object_id
+        self.web.page().runJavaScript(f"window.focusObject && focusObject({json.dumps(object_id)})")
 
-    def close_app(self):
+    def table_selected(self, current, previous):
+        if current.isValid():
+            source = self.sorted_objects.mapToSource(current)
+            self.focus_in_view(self.objects.rows[source.row()][0])
+
+    def picked_in_view(self, object_id):
+        """A point clicked in the 3D view selects its object in the table (or clears the selection)."""
+        self.table.selectionModel().blockSignals(True)
+        self.table.clearSelection()
+        for row, values in enumerate(self.objects.rows):
+            if values[0] == object_id:
+                index = self.sorted_objects.mapFromSource(self.objects.index(row, 0))
+                self.table.selectRow(index.row())
+                self.table.scrollTo(index)
+                break
+        self.table.selectionModel().blockSignals(False)
+
+    def open_browser_view(self):
+        def action():
+            key, folder = self.selected_folder()
+            webbrowser.open(self.view_page(key, folder).resolve().as_uri())
+        self.safe_action(action)
+
+    def closeEvent(self, event):
         if self.busy:
-            messagebox.showinfo("Task running", "Wait for the current task to finish.")
+            QMessageBox.information(self, "Task running", "Wait for the current task to finish.")
+            event.ignore()
             return
-        self.destroy()
+        event.accept()
+
+
+def main():
+    application = QApplication(sys.argv)
+    window = App()
+    window.show()
+    return application.exec()
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    sys.exit(main())
