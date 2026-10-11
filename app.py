@@ -171,12 +171,16 @@ class App(QMainWindow):
         layout.addWidget(self.log_box)
         self.setCentralWidget(central)
 
-    def path_row(self, grid, row, title, edit, command):
-        grid.addWidget(QLabel(title), row, 0)
+    def path_row(self, grid, row, title, edit, command, tip):
+        label = QLabel(title)
+        grid.addWidget(label, row, 0)
         grid.addWidget(edit, row, 1)
         button = QPushButton("Browse")
         button.clicked.connect(command)
         grid.addWidget(button, row, 2)
+        for widget in (label, edit):
+            widget.setToolTip(tip)
+        button.setToolTip("Browse for: " + tip)
 
     def button(self, text, command, tip=None):
         button = QPushButton(text)
@@ -191,22 +195,30 @@ class App(QMainWindow):
         grid = QGridLayout()
         self.model_path = QLineEdit()
         self.output_path = QLineEdit(str((Path.cwd() / "results").resolve()))
-        self.path_row(grid, 0, "Model", self.model_path, self.pick_model)
-        self.path_row(grid, 1, "Results directory", self.output_path, self.pick_output)
+        self.path_row(grid, 0, "Model", self.model_path, self.pick_model,
+                      "Trained model file (.joblib) used to classify every point when processing.")
+        self.path_row(grid, 1, "Results directory", self.output_path, self.pick_output,
+                      "Folder for results; each run creates a new subfolder inside it.")
         layout.addLayout(grid)
         controls = QHBoxLayout()
-        for text, command in (("Add LAS / LAZ", self.add_files), ("Clear list", self.clear_files),
-                              ("Inspect input", self.inspect), ("Process", self.process),
-                              ("Open saved results", self.open_run), ("Synthetic demo", self.open_demo)):
-            controls.addWidget(self.button(text, command))
+        for text, command, tip in (
+                ("Add LAS / LAZ", self.add_files, "Add LAS / LAZ point cloud files to process; you can select several at once."),
+                ("Clear list", self.clear_files, "Empty the file list below. The files themselves are not deleted."),
+                ("Inspect input", self.inspect, "Read only the file headers to quickly show point count, extent and CRS, and check whether each file can be processed."),
+                ("Process", self.process, "Run the selected model on every listed file to detect and segment objects, saving results to the results directory."),
+                ("Open saved results", self.open_run, "Open a results folder from an earlier run and show it in the table and 3D view."),
+                ("Synthetic demo", self.open_demo, "Open the bundled synthetic example and its results to get familiar with the window.")):
+            controls.addWidget(self.button(text, command, tip))
         controls.addStretch()
         layout.addLayout(controls)
         self.inputs = QListWidget()
         self.inputs.setFixedHeight(60)
+        self.inputs.setToolTip("Point cloud files that Process will run on.")
         layout.addWidget(self.inputs)
         viewer_controls = QHBoxLayout()
         self.dataset = QComboBox()
         self.dataset.setMinimumWidth(380)
+        self.dataset.setToolTip("Choose which file's results are shown in the table and 3D view.")
         self.dataset.currentIndexChanged.connect(lambda _: self.view())
         viewer_controls.addWidget(self.dataset)
         self.view_note = QLabel("")
@@ -222,7 +234,7 @@ class App(QMainWindow):
         self.run_info.setToolTip("Settings used when these results were produced (not the current Settings).")
         run_row.addWidget(self.run_info, 1)
         self.reuse_button = self.button("Use these settings", self.reuse_run_settings,
-                                        "Copy this run's settings and model into the current Settings.")
+                                        "Copy this run's settings and model into the current Settings, to process again the same way.")
         self.reuse_button.setVisible(False)
         run_row.addWidget(self.reuse_button)
         layout.addLayout(run_row)
@@ -259,16 +271,20 @@ class App(QMainWindow):
         layout = QVBoxLayout(page)
         grid = QGridLayout()
         self.manifest_path = QLineEdit()
-        self.path_row(grid, 0, "Dataset manifest JSON", self.manifest_path, self.pick_manifest)
+        self.path_row(grid, 0, "Dataset manifest JSON", self.manifest_path, self.pick_manifest,
+                      "Dataset manifest JSON listing the point clouds and label files for training, validation and testing.")
         layout.addLayout(grid)
         hint = QLabel("Labels: point_index,class_id  (0 = background, -1 = unlabelled)")
         hint.setToolTip("One row per labelled point; positive IDs are target classes.\n"
                         "Train, validation and test must come from different scenes.")
         layout.addWidget(hint)
         row = QHBoxLayout()
-        row.addWidget(QLabel("Method"))
+        method_label = QLabel("Method")
+        row.addWidget(method_label)
         self.backend = QComboBox()
         self.backend.addItems(["random_forest", "mlp"])
+        for widget in (method_label, self.backend):
+            widget.setToolTip("Training method: random_forest is a random forest (robust, fast to train); mlp is a small neural network.")
         row.addWidget(self.backend)
         iterations_label = QLabel("Trees")
         self.backend.currentTextChanged.connect(
@@ -276,13 +292,20 @@ class App(QMainWindow):
         row.addWidget(iterations_label)
         self.iterations = QLineEdit("100")
         self.iterations.setFixedWidth(70)
+        tip = ("Number of trees for random_forest, or maximum training epochs for mlp.\n"
+               "Higher is usually more accurate but slower to train; lower is faster but may underfit.")
+        iterations_label.setToolTip(tip)
+        self.iterations.setToolTip(tip)
         row.addWidget(self.iterations)
         row.addStretch()
         layout.addLayout(row)
         buttons = QHBoxLayout()
-        for text, command in (("Create label template", self.make_labels), ("Train and save model", self.train),
-                              ("Evaluate on test set", self.evaluate)):
-            buttons.addWidget(self.button(text, command))
+        for text, command, tip in (
+                ("Create label template", self.make_labels,
+                 "Create a blank label CSV for a point cloud; fill in each point's class to use it for training."),
+                ("Train and save model", self.train, "Train a model on the dataset manifest and save it as a .joblib file."),
+                ("Evaluate on test set", self.evaluate, "Measure the accuracy of the Model above on the test set and save the results as JSON.")):
+            buttons.addWidget(self.button(text, command, tip))
         buttons.addStretch()
         layout.addLayout(buttons)
         layout.addStretch()
@@ -295,19 +318,36 @@ class App(QMainWindow):
         self.meters = QCheckBox("X/Y/Z in metres")
         self.threshold, self.radius, self.minimum = QLineEdit("0.7"), QLineEdit("0.3"), QLineEdit("10")
         self.neighbors, self.limit = QLineEdit("20"), QLineEdit("0")
-        self.limit.setToolTip("0 = no limit: the whole file is processed.\n"
-                              "Very large files are refused only if they would not fit in memory.")
+
         self.area = QComboBox()
         self.area.addItems(["unresolved", "convex_hull_xy"])
-        self.area.setToolTip("unresolved: leave Area blank\nconvex_hull_xy: area of the XY convex hull")
         fields = [[("Fallback CRS", self.crs), ("Vertical datum", self.datum), (None, self.meters)],
                   [("Score threshold", self.threshold), ("Cluster radius m", self.radius),
                    ("Min object points", self.minimum), ("Area method", self.area)],
                   [("Neighbours", self.neighbors), ("Max points / file", self.limit)]]
+        tips = {
+            self.crs: "Projected CRS to use when a file has none, e.g. EPSG:32632. Ignored when the file has its own CRS.",
+            self.datum: "Name of the vertical datum. It is recorded in the results and does not affect calculations.",
+            self.meters: "Confirm that X, Y and Z (including height) are all in metres. Processing is refused until this is ticked.",
+            self.threshold: "Minimum confidence (0 to 1) for a point to count as part of an object.\n"
+                            "Higher gives more reliable results but misses some objects; lower finds more objects but more false detections.",
+            self.radius: "Search radius in metres for grouping object points into one object.\n"
+                         "Higher merges neighbouring objects into one; lower splits one object into pieces.",
+            self.minimum: "Fewest points an object may have; smaller groups are discarded.\n"
+                          "Higher removes scattered noise but may drop small objects; lower keeps more small objects.",
+            self.area: "How object area is computed: unresolved leaves Area blank; convex_hull_xy uses the area of the XY convex hull.",
+            self.neighbors: "Neighbouring points (3 to 128) used to compute each point's local shape features during training.\n"
+                            "Processing uses the model's training value. Higher is smoother but slower; lower is more detailed but more sensitive to noise.",
+            self.limit: "Maximum points allowed per file; 0 means no limit and the whole file is processed.\n"
+                        "A limit guards against processing huge files by mistake; files above it are refused.",
+        }
         for row, items in enumerate(fields):
             for col, (title, widget) in enumerate(items):
+                widget.setToolTip(tips[widget])
                 if title:
-                    grid.addWidget(QLabel(title), row, col * 2)
+                    label = QLabel(title)
+                    label.setToolTip(tips[widget])
+                    grid.addWidget(label, row, col * 2)
                 grid.addWidget(widget, row, col * 2 + 1)
         grid.setColumnStretch(8, 1)
         return box

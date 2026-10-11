@@ -43,15 +43,15 @@
 <header>
   <span class="name" id="title"></span>
   <span class="spacer"></span>
-  <label>Colour <select id="colour">
+  <label title="How points are coloured: by class, by object (one colour each), by height or by intensity.">Colour <select id="colour">
     <option value="class">Class</option><option value="objects">Objects</option>
     <option value="height">Height</option><option value="intensity">Intensity</option>
   </select></label>
-  <label>Size <input id="size" type="range" min="1" max="6" step="0.5" value="2"></label>
-  <label><input id="edl" type="checkbox" checked> Shading</label>
-  <input id="find" type="text" placeholder="Find object ID ↵">
-  <button id="top">Top</button>
-  <button id="reset">Reset view</button>
+  <label title="Point size. Drag right for bigger, easier-to-see points; left for smaller points and finer detail.">Size <input id="size" type="range" min="1" max="6" step="0.5" value="2"></label>
+  <label title="Adds shading so 3D shapes are easier to see; untick for flat colours."><input id="edl" type="checkbox" checked> Shading</label>
+  <input id="find" type="text" placeholder="Find object ID ↵" title="Type an object ID and press Enter to jump to that object.">
+  <button id="top" title="Look straight down from above.">Top</button>
+  <button id="reset" title="Return to the default view showing the whole point cloud.">Reset view</button>
 </header>
 <main>
   <canvas id="gl" title="Drag: rotate · Right-drag or Shift-drag: pan · Wheel: zoom · Double-click: reset"></canvas>
@@ -219,7 +219,7 @@ function legend(mode) {
     classNames.map(([, name], k) => {
       const colour = k === 0 ? `linear-gradient(90deg,${TERRAIN.map(css)})`
         : mode === "objects" ? `conic-gradient(${OBJECT.slice(0, 5).map(css)})` : css(CLASS[(k - 1) % CLASS.length]);
-      return `<label class="row"><input type="checkbox" data-k="${k}" ${hidden >> k & 1 ? "" : "checked"}>
+      return `<label class="row" title="Untick to hide this class's points."><input type="checkbox" data-k="${k}" ${hidden >> k & 1 ? "" : "checked"}>
         <span class="swatch" style="background:${colour}"></span>${name}<span class="count">${classCounts[k].toLocaleString("en")}</span></label>`;
     }).join("");
   box.querySelectorAll("input").forEach(cb => cb.addEventListener("change", () => {
