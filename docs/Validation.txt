@@ -19,9 +19,9 @@ Ten synthetic LAZ workflow tests passed:
 
 GUI smoke validation:
   English interface creation, saved-result loading, object table,
-  and opening the browser 3D view (whole view and centred on one object).
+  embedded Qt WebEngine 3D view, table-to-3D focus and 3D-click-to-table selection.
 
 These are software functionality checks. No real-world object-detection AP,
 instance IoU, acceptance threshold or trained underwater production model is claimed.
 
-Browser 3D view verified on Devil's Bridge (7.3 M points): 3,000,000 points shown, about 5 ms per frame; full-resolution exports remain intact.
+3D view verified on Devil's Bridge (7.3 M points): 3,000,000 points shown, 3.4 ms per frame in Qt WebEngine; full-resolution exports remain intact.

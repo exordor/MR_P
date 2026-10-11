@@ -12,11 +12,11 @@ The architecture is fully editable in [diagrams.net](docs/MOST_Software_Architec
 
 ## Installation
 
-Python 3.11 and Tk are required. The Windows python.org installer normally includes Tk. Initial installation downloads the pinned dependencies in `requirements.txt`; processing runs locally afterwards.
+Python 3.11 is required. The interface uses PySide6 (Qt) with an embedded Qt WebEngine 3D view, installed from `requirements.txt` (about 300 MB download). Processing and the 3D view run fully offline afterwards.
 
 On Windows, run `install_windows.cmd`, then `start_windows.cmd`.
 
-On Linux, install Python 3.11, venv and the appropriate Tk package for your distribution, then run:
+On Linux, install Python 3.11 and venv (Qt WebEngine also needs the usual desktop libraries such as `libnss3` and `libxkbcommon`), then run:
 
 ```sh
 sh install_linux.sh
@@ -45,7 +45,7 @@ The demonstration contains no real YellowScan measurements. Its trained model an
 4. Create a dataset manifest using `manifest_example.json`. Separate independent scenes or non-overlapping regions into train, validation and test sets. Use the same `scene_id` for overlapping data; the software checks duplicate paths, identical file content and cross-split scene IDs, but cannot prove that different files do not overlap spatially.
 5. Select the manifest in **Train and Evaluate**, choose a backend and training iterations, and save a new model. Every declared class must appear in the training labels. Validation metrics and model settings are saved alongside the model. Test labels are used only when **Evaluate held-out test set** is clicked.
 6. In **Process and View**, select a trusted trained model, one or more input files, and a results directory. Files run sequentially; a failed file does not stop the remaining batch.
-7. The object table lists every detected object. Click **Open 3D view** to see the cloud in your web browser, or double-click an object to open the view centred on it. Saved results can be reopened without rerunning inference or reading the original input file.
+7. The object table (left) lists every detected object; click a heading to sort. The 3D view (right) is part of the window. Click an object in the table to fly to it in 3D, or click a point in 3D to select its object in the table. **Open in browser** shows the same view in a web browser. Saved results can be reopened without rerunning inference or reading the original input file.
 
 ## Outputs and definitions
 
@@ -76,7 +76,7 @@ object ID,x,y,z,Nr_of_points,Intensity,Area,confidence
 - **Area** is blank by default (`unresolved`). An explicitly selected `convex_hull_xy` computes the horizontal convex-hull footprint in square metres. It fills concavities and holes and is not 3D surface area. The method needs project approval before acceptance.
 - **Confidence** is the mean winning-class probability of the points assigned to the final instance. It is uncalibrated and is not measured detection accuracy.
 
-Processing and CSV export use original points without downsampling. Each processed file also gets `view3d.html`, an offline page that draws up to 3,000,000 points with the GPU (WebGL); object points get at least half of that budget. Open it with **Open 3D view**. Drag to rotate, right-drag to pan, scroll to zoom, click a point to identify its object, or type an object ID to jump to it. Measured on Devil's Bridge: 3 M points render in about 5 ms per frame. The page is about 22 bytes per shown point, so up to about 66 MB. Display sampling does not change inference, object coordinates, reports or CSV exports. Results saved by earlier versions (with `view.npz`) still open; their 3D view shows the 30,000 cached points. Object IDs match across the report, object files and 3D view. Source mapping is retained through per-dataset reports and metadata. CSV is UTF-8 with a BOM; missing values use blank cells and JSON nulls.
+Processing and CSV export use original points without downsampling. Each processed file also gets `view3d.html`, an offline page that draws up to 3,000,000 points with the GPU (WebGL); object points get at least half of that budget. It is shown inside the application (and can be opened in a browser). Drag to rotate, right-drag to pan, scroll to zoom, click a point to identify its object, or type an object ID to jump to it. Measured on Devil's Bridge: 3 M points render in about 3–5 ms per frame. The page is about 22 bytes per shown point, so up to about 66 MB. Display sampling does not change inference, object coordinates, reports or CSV exports. Results saved by earlier versions (with `view.npz`) still open; their 3D view shows the 30,000 cached points. Object IDs match across the report, object files and 3D view. Source mapping is retained through per-dataset reports and metadata. CSV is UTF-8 with a BOM; missing values use blank cells and JSON nulls.
 
 ## Scope and limits
 

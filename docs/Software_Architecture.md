@@ -6,7 +6,7 @@ The prototype runs as one local Python desktop process. A GUI thread handles int
 
 | Component | Responsibility | Implementation |
 |---|---|---|
-| Desktop interface and queue | Training, model selection, single/batch jobs, saved-result viewing, settings and error log | Tkinter, worker thread and event queue in `app.py` |
+| Desktop interface and queue | Training, model selection, single/batch jobs, saved-result viewing, settings and error log | PySide6 (Qt), worker thread and queued Qt signal in `app.py` |
 | Import and validation | Read LAS/LAZ, check attributes, CRS, metric units, point limits and waveform indicators | laspy, lazrs and pyproj in `core.py` |
 | Feature preparation | Preserve original point mapping; calculate local geometry, intensity, return and scan-angle features | NumPy, SciPy and cKDTree |
 | Model management | Train RF or MLP, validate, save/reload schema and settings, predict point classes and scores | scikit-learn and joblib |
@@ -17,7 +17,7 @@ The prototype runs as one local Python desktop process. A GUI thread handles int
 
 LAS/LAZ import produces original double-precision coordinates and attributes. Feature calculations use translated local coordinates to avoid unnecessary sensitivity to large map offsets. Predictions retain the original record order. Per-class clustering produces final instance membership; all exported object properties are calculated from the original assigned coordinates.
 
-The 3D view (`view3d.html`) subtracts the scene centre and samples up to 3,000,000 points, object points first, and is drawn by the browser's GPU. The display transformation and sampling do not change reports or CSV exports.
+The 3D view (`view3d.html`) subtracts the scene centre and samples up to 3,000,000 points, object points first, and is drawn by the GPU in an embedded Qt WebEngine view (or any browser). The display transformation and sampling do not change reports or CSV exports.
 
 Training consumes labelled independent scenes. The manifest explicitly separates train, validation and test datasets. A model stores its class definitions, feature schema, neighbour count, preprocessing settings, provenance and validation results. Independent test evaluation is a separate user action.
 
@@ -35,4 +35,4 @@ The current processing strategy is full-file CPU execution, with explicit size l
 
 ## Display memory update
 
-The application is titled Object Detection. The desktop window lists objects and opens the browser 3D view; it no longer draws points itself. Reports and exports retain full-resolution detected points. Processing has no default point limit; whole files are processed in memory, with a RAM estimate checked before decoding and chunked, multi-core feature extraction and clustering.
+The application is titled Object Detection. The desktop window shows a sortable object table beside the embedded 3D view; selecting in either one selects in the other. Reports and exports retain full-resolution detected points. Processing has no default point limit; whole files are processed in memory, with a RAM estimate checked before decoding and chunked, multi-core feature extraction and clustering.

@@ -39,7 +39,6 @@
 </div>
 <div id="help">Drag: rotate · Right-drag or Shift-drag: pan · Wheel: zoom · Double-click: reset</div>
 <script id="data" type="application/json">/*DATA*/</script>
-<script src="view3d_focus.js"></script>
 <script>
 "use strict";
 const D = JSON.parse(document.getElementById("data").textContent);
@@ -177,27 +176,32 @@ function pick(e) {
     if (depth < bestScore) { bestScore = depth; best = i; }
   }
   const info = document.getElementById("pick");
-  if (best < 0) { info.textContent = "No point here."; select(0); return; }
+  if (best < 0) { info.textContent = "No point here."; select(0); console.log("PICK "); return; }
   const o = objects.get(I[best]);
   info.textContent = o ? describe(o) : "Background point (not part of an object).";
   select(o ? o[0] : 0);
+  console.log("PICK " + (o ? o[1] : ""));  // Read by the desktop app to select the object in its table.
 }
-document.getElementById("go").addEventListener("click", () => {
-  const q = document.getElementById("find").value.trim().toUpperCase();
+// Also called by the desktop app when an object is chosen in its table.
+function focusObject(id) {
+  const q = String(id).trim().toUpperCase();
   const o = q && D.objects.find(o => o[1].toUpperCase() === q || o[1].toUpperCase().endsWith("_" + q));
   const info = document.getElementById("pick");
-  if (!o) { info.textContent = "Object not found."; return; }
+  if (!o) { info.textContent = "Object not found."; return false; }
   info.textContent = describe(o);
+  document.getElementById("find").value = o[1];
   target = [o[5], o[6], o[7]]; dist = Math.min(dist, Math.max(8, radius / 15));
   select(o[0]);
-});
+  return true;
+}
+window.focusObject = focusObject;
+document.getElementById("go").addEventListener("click", () => focusObject(document.getElementById("find").value));
 document.getElementById("find").addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("go").click(); });
 document.getElementById("reset").addEventListener("click", () => { reset(); select(0); });
 document.getElementById("colour").addEventListener("change", colours);
 document.getElementById("size").addEventListener("input", draw);
 reset();
 colours();
-if (window.FOCUS) { document.getElementById("find").value = window.FOCUS; document.getElementById("go").click(); }
 </script>
 </body>
 </html>
