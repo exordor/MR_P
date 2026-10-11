@@ -1,6 +1,7 @@
 """Small, offline LAS/LAZ ML prototype. See README_ZH.txt for scope."""
 from __future__ import annotations
 
+import base64
 import csv
 import hashlib
 import json
@@ -30,6 +31,8 @@ from sklearn.preprocessing import StandardScaler
 
 VERSION = "0.1.0-prototype"
 DISPLAY_LIMIT = 30_000
+WEB_LIMIT = 3_000_000  # Points in the browser (WebGL) 3D view.
+WEB_TEMPLATE = Path(__file__).resolve().parent / "viewer3d.html"
 # Measured peak on real YellowScan files is ~330 bytes per point; keep headroom.
 BYTES_PER_POINT = 600
 WORKERS = os.cpu_count() or 1
@@ -462,10 +465,10 @@ def projected_area(xyz, method):
         return None
 
 
-def display_indices(instance, limit=DISPLAY_LIMIT):
+def display_indices(instance, limit=DISPLAY_LIMIT, maximum=DISPLAY_LIMIT):
     """Bound display size, retaining a representative of each instance if possible."""
-    if not 1 <= limit <= DISPLAY_LIMIT:
-        raise ValueError(f"Display limit must be 1..{DISPLAY_LIMIT}")
+    if not 1 <= limit <= maximum:
+        raise ValueError(f"Display limit must be 1..{maximum}")
     if len(instance) <= limit:
         return np.arange(len(instance))
     labels, first = np.unique(instance, return_index=True)
@@ -477,6 +480,32 @@ def display_indices(instance, limit=DISPLAY_LIMIT):
     available[representatives] = False
     extra = rng.choice(np.flatnonzero(available), limit - len(representatives), replace=False)
     return np.sort(np.concatenate((representatives, extra)))
+
+
+def web_indices(instance, limit=WEB_LIMIT):
+    """Browser sample: object points get at least half the budget, so objects stay dense."""
+    if len(instance) <= limit:
+        return np.arange(len(instance))
+    objects, background = np.flatnonzero(instance > 0), np.flatnonzero(instance == 0)
+    take_objects = min(len(objects), max(limit // 2, limit - len(background)))
+    take_background = min(len(background), limit - take_objects)
+    chosen = objects[display_indices(instance[objects], take_objects, len(objects))] if take_objects else objects[:0]
+    rng = np.random.default_rng(42)
+    return np.sort(np.concatenate((chosen, rng.choice(background, take_background, replace=False))))
+
+
+def write_web_view(dest, name, xyz, instance, objects, origin, total):
+    """Self-contained offline HTML page drawing the points with WebGL (GPU)."""
+    def encode(array):
+        return base64.b64encode(np.ascontiguousarray(array).tobytes()).decode("ascii")
+    data = {"name": name, "total": int(total),
+            "xyz": encode((xyz - origin).astype("<f4")), "instance": encode(instance.astype("<i4")),
+            "objects": [[o["instance_index"], o["object_id"], o["class_name"], o["point_count"], o["confidence"],
+                         *(np.asarray(o["centroid"]) - origin).tolist()] for o in objects]}
+    # "</" is escaped so no value can close the <script> element that holds the data.
+    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    page = WEB_TEMPLATE.read_text(encoding="utf-8").replace("/*DATA*/", payload, 1)
+    Path(dest).write_text(page, encoding="utf-8")
 
 
 def process_batch(paths, model_path, output_root, cfg, log=print):
@@ -552,6 +581,9 @@ def process_batch(paths, model_path, output_root, cfg, log=print):
                                 point_index=selected_view, instance=point_instance[selected_view],
                                 predicted_class=classes[selected_view], confidence=confidence[selected_view],
                                 origin=cloud["xyz"].mean(axis=0), total_points=len(features))
+            web = web_indices(point_instance)
+            write_web_view(folder / "view3d.html", Path(path).name, cloud["xyz"][web], point_instance[web],
+                           objects, cloud["xyz"].mean(axis=0), len(features))
             entry["display"] = {"source_points": len(features), "cached_points": len(selected_view),
                                 "limit": DISPLAY_LIMIT, "method": "deterministic representative sampling"}
             write_json(folder / "objects.json", objects)
@@ -561,7 +593,7 @@ def process_batch(paths, model_path, output_root, cfg, log=print):
             # Never expose partial outputs as successful objects.
             for dest in exported:
                 dest.unlink(missing_ok=True)
-            for filename in ("report.csv", "view.npz", "objects.json"):
+            for filename in ("report.csv", "view.npz", "view3d.html", "objects.json"):
                 (folder / filename).unlink(missing_ok=True)
             entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
             log(f"{dataset_id}: FAILED: {exc}")

@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D view</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #15181d; color: #e8eaed;
+               font: 13px -apple-system, "Segoe UI", Arial, sans-serif; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  #panel { position: absolute; top: 10px; left: 10px; background: rgba(21, 24, 29, .86);
+           border: 1px solid #3a3f47; border-radius: 6px; padding: 10px 12px; max-width: 340px; }
+  #panel h1 { font-size: 14px; margin: 0 0 4px; word-break: break-all; }
+  #panel .muted { color: #9aa0a6; }
+  #panel label, #panel button, #panel input, #panel select { font: inherit; }
+  .row { display: flex; gap: 6px; align-items: center; margin-top: 7px; flex-wrap: wrap; }
+  input[type=text] { width: 130px; background: #22262d; color: inherit; border: 1px solid #3a3f47; border-radius: 4px; padding: 2px 5px; }
+  button, select { background: #2c313a; color: inherit; border: 1px solid #3a3f47; border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+  #pick { margin-top: 8px; min-height: 1.2em; }
+  #help { position: absolute; bottom: 8px; left: 10px; color: #9aa0a6; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="panel">
+  <h1 id="title"></h1>
+  <div class="muted" id="summary"></div>
+  <div class="row">
+    <label>Colour <select id="colour"><option value="objects">objects</option><option value="height">height</option></select></label>
+    <label>Size <input id="size" type="range" min="1" max="8" step="0.5" value="2"></label>
+  </div>
+  <div class="row">
+    <input id="find" type="text" placeholder="Object ID, e.g. O00012">
+    <button id="go">Go</button>
+    <button id="reset">Reset view</button>
+  </div>
+  <div id="pick" class="muted">Click a point to identify it.</div>
+</div>
+<div id="help">Drag: rotate · Right-drag or Shift-drag: pan · Wheel: zoom · Double-click: reset</div>
+<script id="data" type="application/json">/*DATA*/</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const decode = s => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u.buffer; };
+const P = new Float32Array(decode(D.xyz)), I = new Int32Array(decode(D.instance)), N = I.length;
+const objects = new Map(D.objects.map(o => [o[0], o]));  // instance -> [instance, id, class, points, confidence, x, y, z]
+document.getElementById("title").textContent = D.name;
+document.getElementById("summary").textContent =
+  `${N.toLocaleString()} of ${D.total.toLocaleString()} points shown · ${D.objects.length.toLocaleString()} objects`;
+
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl", { antialias: false });
+if (!gl) document.getElementById("pick").textContent = "WebGL is unavailable in this browser.";
+const shader = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER,
+  "attribute vec3 p; attribute vec3 c; uniform mat4 m; uniform float s; varying vec3 v;" +
+  "void main(){ gl_Position = m * vec4(p, 1.0); gl_PointSize = s; v = c; }"));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER,
+  "precision mediump float; varying vec3 v;" +
+  "void main(){ if (length(gl_PointCoord - 0.5) > 0.5) discard; gl_FragColor = vec4(v, 1.0); }"));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+const posBuf = gl.createBuffer(), colBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+gl.bufferData(gl.ARRAY_BUFFER, P, gl.STATIC_DRAW);
+const aP = gl.getAttribLocation(prog, "p"), aC = gl.getAttribLocation(prog, "c");
+gl.enableVertexAttribArray(aP);
+gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 0, 0);
+gl.enable(gl.DEPTH_TEST);
+
+// Bounds and colours.
+const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+for (let i = 0; i < N; i++) for (let k = 0; k < 3; k++) { const v = P[3 * i + k]; if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; }
+const centre = lo.map((v, k) => (v + hi[k]) / 2);
+const radius = Math.max(1, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2);
+const hue = h => { const f = n => { const k = (n + h * 6) % 6; return 1 - Math.max(0, Math.min(k, 4 - k, 1)); }; return [f(5), f(3), f(1)]; };
+const viridis = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]];
+let selected = 0;
+function colours() {
+  const mode = document.getElementById("colour").value, C = new Uint8Array(3 * N), dz = Math.max(hi[2] - lo[2], 1e-6);
+  for (let i = 0; i < N; i++) {
+    let c;
+    if (mode === "height") {
+      const t = (P[3 * i + 2] - lo[2]) / dz * 4, a = Math.min(3, Math.floor(t)), f = t - a;
+      c = viridis[a].map((v, k) => v + (viridis[a + 1][k] - v) * f);
+    } else if (I[i] > 0 && (!selected || I[i] === selected)) {
+      c = hue((I[i] * 0.61803398875) % 1).map(v => v * 255);  // Same golden-angle hues as the desktop viewer.
+    } else {
+      c = selected ? [70, 74, 82] : [150, 158, 170];  // Dim everything else while an object is selected.
+    }
+    C[3 * i] = c[0]; C[3 * i + 1] = c[1]; C[3 * i + 2] = c[2];
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, C, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(aC);
+  gl.vertexAttribPointer(aC, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+  draw();
+}
+
+// Orbit camera around a target, Z up.
+let target, dist, azim, elev;
+function reset() { target = centre.slice(); dist = radius * 2.2; azim = -Math.PI / 3; elev = Math.PI / 5; draw(); }
+function matrix() {
+  const w = canvas.width, h = canvas.height, f = 1 / Math.tan(Math.PI / 8), near = dist / 1000, far = dist + radius * 4;
+  const eye = [target[0] + dist * Math.cos(elev) * Math.cos(azim), target[1] + dist * Math.cos(elev) * Math.sin(azim),
+               target[2] + dist * Math.sin(elev)];
+  const z = eye.map((v, k) => v - target[k]), zl = Math.hypot(...z); z.forEach((v, k) => z[k] = v / zl);
+  let x = [-z[1], z[0], 0]; const xl = Math.hypot(...x) || 1; x = x.map(v => v / xl);
+  const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const view = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, eye), -dot(y, eye), -dot(z, eye), 1];
+  const proj = [f * h / w, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), -1, 0, 0, 2 * far * near / (near - far), 0];
+  const m = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+    let s = 0; for (let k = 0; k < 4; k++) s += proj[k * 4 + r] * view[c * 4 + k]; m[c * 4 + r] = s;
+  }
+  return { m, x, y };
+}
+let pending = false;
+function draw() {
+  if (pending || !target) return;
+  pending = true;
+  requestAnimationFrame(() => {
+    pending = false;
+    const dpr = window.devicePixelRatio || 1, w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0.082, 0.094, 0.114, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.uniformMatrix4fv(gl.getUniformLocation(prog, "m"), false, matrix().m);
+    gl.uniform1f(gl.getUniformLocation(prog, "s"), document.getElementById("size").value * dpr);
+    gl.drawArrays(gl.POINTS, 0, N);
+  });
+}
+
+// Mouse: rotate, pan, zoom, click-to-identify.
+let drag = null;
+canvas.addEventListener("contextmenu", e => e.preventDefault());
+canvas.addEventListener("mousedown", e => { drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey, moved: false }; });
+window.addEventListener("mouseup", e => { if (drag && !drag.moved && e.target === canvas) pick(e); drag = null; });
+window.addEventListener("mousemove", e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.pan) {
+    const { x, y } = matrix(), s = dist / canvas.clientHeight * 0.8;
+    for (let k = 0; k < 3; k++) target[k] += (-dx * x[k] + dy * y[k]) * s;
+  } else {
+    azim -= dx * 0.008; elev = Math.max(-1.55, Math.min(1.55, elev + dy * 0.008));
+  }
+  draw();
+});
+canvas.addEventListener("wheel", e => { e.preventDefault(); dist *= Math.exp(e.deltaY * 0.0015); draw(); }, { passive: false });
+canvas.addEventListener("dblclick", reset);
+window.addEventListener("resize", draw);
+
+function describe(o) {
+  return `${o[1]} (${o[2]}) · ${o[3].toLocaleString()} points · confidence ${o[4].toFixed(3)}`;
+}
+function select(instance) { selected = instance; colours(); }
+function pick(e) {
+  const { m } = matrix(), r = canvas.getBoundingClientRect();
+  const mx = (e.clientX - r.left) / r.width * 2 - 1, my = 1 - (e.clientY - r.top) / r.height * 2;
+  let best = -1, bestScore = Infinity;
+  const tol = 8 / r.height * 2;
+  for (let i = 0; i < N; i++) {
+    const px = P[3 * i], py = P[3 * i + 1], pz = P[3 * i + 2];
+    const w = m[3] * px + m[7] * py + m[11] * pz + m[15];
+    if (w <= 0) continue;
+    const sx = (m[0] * px + m[4] * py + m[8] * pz + m[12]) / w, sy = (m[1] * px + m[5] * py + m[9] * pz + m[13]) / w;
+    if (Math.abs(sx - mx) > tol || Math.abs(sy - my) > tol) continue;
+    const depth = (m[2] * px + m[6] * py + m[10] * pz + m[14]) / w;  // Nearest to the camera wins.
+    if (depth < bestScore) { bestScore = depth; best = i; }
+  }
+  const info = document.getElementById("pick");
+  if (best < 0) { info.textContent = "No point here."; select(0); return; }
+  const o = objects.get(I[best]);
+  info.textContent = o ? describe(o) : "Background point (not part of an object).";
+  select(o ? o[0] : 0);
+}
+document.getElementById("go").addEventListener("click", () => {
+  const q = document.getElementById("find").value.trim().toUpperCase();
+  const o = q && D.objects.find(o => o[1].toUpperCase() === q || o[1].toUpperCase().endsWith("_" + q));
+  const info = document.getElementById("pick");
+  if (!o) { info.textContent = "Object not found."; return; }
+  info.textContent = describe(o);
+  target = [o[5], o[6], o[7]]; dist = Math.min(dist, Math.max(8, radius / 15));
+  select(o[0]);
+});
+document.getElementById("find").addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("go").click(); });
+document.getElementById("reset").addEventListener("click", () => { reset(); select(0); });
+document.getElementById("colour").addEventListener("change", colours);
+document.getElementById("size").addEventListener("input", draw);
+reset();
+colours();
+</script>
+</body>
+</html>

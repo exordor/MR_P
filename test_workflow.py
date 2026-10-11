@@ -1,4 +1,5 @@
 """Meaningful workflow checks on synthetic LAZ. Run: python -m unittest -v."""
+import base64
 import csv
 import json
 import shutil
@@ -113,6 +114,20 @@ class WorkflowTest(unittest.TestCase):
         if total:
             with self.assertRaisesRegex(ValueError, "Split the file"):
                 core.check_memory(total // core.BYTES_PER_POINT)
+
+    def test_browser_view_embeds_points_and_objects(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        run = Path(process_batch([sample], self.model, self.root / "web", self.cfg, log=lambda x: None))
+        folder = run / "datasets" / "D0001"
+        page = (folder / "view3d.html").read_text(encoding="utf-8")
+        data = json.loads(page.split('type="application/json">', 1)[1].split("</script>", 1)[0])
+        count = len(read_cloud(sample, self.cfg)["xyz"])
+        self.assertEqual(data["total"], count)
+        self.assertEqual(len(base64.b64decode(data["xyz"])), count * 12)
+        instance = np.frombuffer(base64.b64decode(data["instance"]), dtype="<i4")
+        objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
+        self.assertEqual({o[1] for o in data["objects"]}, {o["object_id"] for o in objects})
+        self.assertEqual(set(instance) - {0}, {o["instance_index"] for o in objects})
 
     def test_chunked_dbscan_matches_sklearn_core_clusters(self):
         rng = np.random.default_rng(0)

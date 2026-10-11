@@ -6,6 +6,7 @@ import os
 import queue
 import sys
 import threading
+import webbrowser
 import tkinter as tk
 import zipfile
 from dataclasses import asdict
@@ -17,7 +18,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 from core import (DISPLAY_LIMIT, Settings, display_indices, evaluate_model, label_template, process_batch,
-                  read_cloud, train_model)
+                  read_cloud, train_model, write_web_view)
 
 
 def tooltip(widget, text):
@@ -109,6 +110,9 @@ class App(tk.Tk):
         self.dataset = ttk.Combobox(viewer_controls, state="readonly", width=45)
         self.dataset.pack(side="left")
         ttk.Button(viewer_controls, text="View", command=self.view).pack(side="left", padx=8)
+        browser = ttk.Button(viewer_controls, text="3D in browser", command=self.open_browser_view)
+        browser.pack(side="left")
+        tooltip(browser, "Smooth GPU view of up to 3,000,000 points.\nClick a point to identify its object.")
         ttk.Checkbutton(viewer_controls, text="Show objects", variable=self.show_objects,
                         command=self.redraw).pack(side="left")
         ttk.Label(viewer_controls, text="Display points").pack(side="left", padx=(12, 4))
@@ -378,6 +382,21 @@ class App(tk.Tk):
                 self.object_list.insert("end", f"{obj['object_id']} ({obj['class_name']})")
             self.view_note.configure(text=f"{len(indices):,} / {total:,} points shown · {len(self.current_objects)} objects")
             self.redraw()
+        self.safe_action(action)
+
+    def open_browser_view(self):
+        def action():
+            if not self.run_path or not self.dataset.get():
+                raise ValueError("Process a dataset or open saved results first")
+            key = self.dataset.get().split(" | ", 1)[0]
+            folder = self.run_path / self.datasets[key]["result_path"]
+            page = folder / "view3d.html"
+            if not page.exists():  # Results saved before the browser view existed: use the display cache.
+                objects = json.loads((folder / "objects.json").read_text(encoding="utf-8"))
+                with np.load(folder / "view.npz", allow_pickle=False) as data:
+                    write_web_view(page, Path(self.datasets[key]["source"]).name, data["xyz"], data["instance"],
+                                   objects, data["origin"], int(data["total_points"]))
+            webbrowser.open(page.resolve().as_uri())
         self.safe_action(action)
 
     def select_object(self, event=None):
