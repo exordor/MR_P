@@ -326,10 +326,17 @@ def label_template(path, output, cfg):
         writer = csv.writer(stream)
         writer.writerow(["point_index", "class_id"])
         writer.writerows((i, "") for i in range(len(cloud["xyz"])))
+    write_label_source(output, path, len(cloud["xyz"]))
     return cloud["info"]
 
 
-def load_labels(path, count, targets=None):
+def write_label_source(labels, source, count):
+    """Bind index-based CSV labels to the exact source file, without storing a private path."""
+    write_json(str(labels) + ".source.json", {"source_sha256": sha256(source), "point_count": count})
+
+
+def load_labels(path, count, targets=None, *, source_xyz=None, label_field="classification",
+                source_sha256=None, labels_source_sha256=None):
     """point_index,class_id CSV, or a LAS/LAZ whose classification field marks the targets.
 
     Labels are ASPRS LAS class codes. A point whose code is one of the manifest's target classes is that
@@ -339,13 +346,28 @@ def load_labels(path, count, targets=None):
     targets = list(targets or ())
     if Path(path).suffix.lower() in (".las", ".laz"):
         las = laspy.read(path)
-        codes = np.asarray(las.classification, dtype=np.int32)
-        if las.header.point_format.id < 6:  # LAS 1.2/1.3: codes above 31 are kept in User Data.
-            user = np.asarray(las.user_data, dtype=np.int32)
-            codes = np.where(np.isin(user, [t for t in targets if t > 31]), user, codes)
-        if len(codes) != count:
+        if len(las.points) != count:
             raise ValueError("Label LAS/LAZ has a different point count from its point cloud")
+        if source_xyz is None:
+            raise ValueError("LAS labels require original point coordinates to verify point order")
+        if np.shape(source_xyz) != (count, 3):
+            raise ValueError("Original point coordinates have an invalid shape")
+        for axis, values in enumerate((las.x, las.y, las.z)):
+            if not np.allclose(values, source_xyz[:, axis], rtol=0, atol=1e-7):
+                raise ValueError("LAS label coordinates / point order differ from the source; restore original order")
+        if label_field not in ("classification", "object_class", "user_data"):
+            raise ValueError("Unsupported LAS label_field")
+        if label_field not in set(las.point_format.dimension_names):
+            raise ValueError(f"LAS label field is missing: {label_field}")
+        raw_codes = np.asarray(las[label_field])
+        if raw_codes.ndim != 1 or raw_codes.dtype.kind not in "ui" or np.any(raw_codes > 255) or np.any(raw_codes < 0):
+            raise ValueError("LAS label field must contain integer class codes 0..255")
+        codes = raw_codes.astype(np.int32)
         return np.where(np.isin(codes, targets), codes, NOT_TARGET)
+    if label_field != "classification":
+        raise ValueError("label_field applies only to LAS/LAZ labels")
+    if source_sha256 is not None and labels_source_sha256 != source_sha256:
+        raise ValueError("CSV labels need a matching labels_source_sha256 or .source.json binding; verify their source first")
     labels = np.full(count, -1, dtype=np.int32)
     seen = set()
     with Path(path).open(newline="", encoding="utf-8-sig") as stream:
@@ -364,7 +386,6 @@ def load_labels(path, count, targets=None):
                     raise ValueError("class_id must be an ASPRS LAS class code 0..255, or -1 / blank = unlabelled")
                 labels[idx] = label
     return np.where((labels >= 0) & ~np.isin(labels, targets), NOT_TARGET, labels)
-    return labels
 
 
 def load_manifest(path):
@@ -396,6 +417,22 @@ def load_manifest(path):
         files.add(resolved)
         hashes.add(digest)
         entry["sha256"] = digest
+        entry["labels_sha256"] = sha256(entry["labels"])
+        entry.setdefault("label_field", "classification")
+        if Path(entry["labels"]).suffix.lower() not in (".las", ".laz"):
+            sidecar = Path(entry["labels"] + ".source.json")
+            binding = entry.get("labels_source_sha256")
+            if sidecar.exists():
+                provenance = json.loads(sidecar.read_text(encoding="utf-8"))
+                with laspy.open(resolved) as reader:
+                    if provenance.get("point_count") != reader.header.point_count:
+                        raise ValueError("CSV label source point count differs")
+                if binding is not None and binding != provenance.get("source_sha256"):
+                    raise ValueError("CSV label source bindings disagree")
+                binding = provenance.get("source_sha256")
+            if binding != digest:
+                raise ValueError("CSV labels need a matching labels_source_sha256 or .source.json binding; verify their source first")
+            entry["labels_source_sha256"] = binding
         records.append(entry)
     if set(e["split"] for e in records) != {"train", "validation", "test"}:
         raise ValueError("Provide separate train, validation and test datasets")
@@ -420,8 +457,14 @@ def collect(records, split, cfg, classes, log):
         if record["split"] != split:
             continue
         log(f"{split}: {Path(record['path']).name}")
+        if sha256(record["path"]) != record["sha256"]:
+            raise ValueError("Point cloud changed since split registration")
+        if sha256(record["labels"]) != record.get("labels_sha256"):
+            raise ValueError("Labels changed or lack a registered fingerprint; register verified labels and retrain")
         cloud = read_cloud(record["path"], cfg)
-        labels = load_labels(record["labels"], len(cloud["xyz"]), {int(k) for k in classes if int(k)})
+        labels = load_labels(record["labels"], len(cloud["xyz"]), {int(k) for k in classes if int(k)},
+                             source_xyz=cloud["xyz"], label_field=record.get("label_field", "classification"),
+                             source_sha256=record["sha256"], labels_source_sha256=record.get("labels_source_sha256"))
         selected = labels >= 0
         if not selected.any():
             raise ValueError(f"No labels: {record['labels']}")
@@ -701,17 +744,49 @@ def truth_path(source):
     return Path(source).with_suffix(".truth.json")
 
 
-def load_truth(path, count):
+def load_truth(path, count, *, source_sha256=None):
     truth = json.loads(Path(path).read_text(encoding="utf-8"))
     if truth.get("point_count") != count:
         raise ValueError("Ground truth was made for a different point cloud (point count differs)")
+    if source_sha256 is not None and truth.get("source_sha256") != source_sha256:
+        raise ValueError("Ground truth source_sha256 is missing or differs; verify the source and point order")
+    if not isinstance(truth.get("objects"), list):
+        raise ValueError("Ground truth objects must be a list")
     instance = np.zeros(count, dtype=np.int32)
+    seen = set()
     for number, target in enumerate(truth["objects"], 1):
+        if not isinstance(target, dict):
+            raise ValueError("Ground truth object must be a record")
+        oid = target.get("object_id")
+        if not isinstance(oid, str) or not oid.strip() or oid in seen:
+            raise ValueError("Ground truth object IDs must be nonempty and unique")
+        seen.add(oid)
+        if type(target.get("class_id")) is not int:
+            raise ValueError("Ground truth class_id must be an integer")
+        check_target_code(target["class_id"])
+        if not isinstance(target.get("class_name"), str) or not target["class_name"].strip():
+            raise ValueError("Ground truth class_name must be nonempty")
+        center = target.get("center")
+        if not isinstance(center, list) or len(center) != 3 or any(
+                type(v) not in (int, float) or not np.isfinite(v) for v in center):
+            raise ValueError("Ground truth center must contain three finite coordinates")
+        if ("point_range" in target) == ("point_indices" in target):
+            raise ValueError("Ground truth needs exactly one of point_range or point_indices")
         if "point_range" in target:
-            start, stop = target["point_range"]
-            instance[start:stop] = number
+            bounds = target["point_range"]
+            if (not isinstance(bounds, list) or len(bounds) != 2 or
+                    any(type(v) is not int for v in bounds) or not 0 <= bounds[0] <= bounds[1] <= count):
+                raise ValueError("Ground truth point_range is invalid or out of range")
+            selected = slice(*bounds)
         else:
-            instance[np.asarray(target["point_indices"], dtype=np.int64)] = number
+            indices = target["point_indices"]
+            if (not isinstance(indices, list) or any(type(v) is not int or not 0 <= v < count for v in indices)
+                    or len(set(indices)) != len(indices)):
+                raise ValueError("Ground truth point_indices contain duplicate, invalid or out-of-range indices")
+            selected = np.asarray(indices, dtype=np.int64)
+        if np.any(instance[selected]):
+            raise ValueError("Ground truth objects have overlapping point indices")
+        instance[selected] = number
     return truth["objects"], instance
 
 
@@ -779,15 +854,40 @@ POINT_FORMAT_WITH_FULL_CLASS = {0: 6, 1: 6, 2: 7, 3: 7, 4: 9, 5: 10}
 
 
 def write_classified(source, dest, groups, point_instance, las_output="same as input"):
-    """Copy of the input with every attribute kept; detected target points get their target LAS class.
+    """Preserve source attributes except target classifications and reserved prediction fields.
 
     Points not in a detected object keep the input (vendor) class. An extra dimension object_instance
     holds the object number (0 = none). LAS 1.2/1.3 point formats (0-5) store only classes 0-31:
-    "same as input" keeps the version and puts larger target codes in the User Data field of target
-    points; "1.4" converts to the matching LAS 1.4 format, where the class field holds every code.
+    object_class holds current predicted target codes in every version (0 = no detected target).
+    User Data is never changed. Legacy class fields retain their input value for codes above 31.
     Returns where the target codes were written.
     """
+    if Path(source).resolve() == Path(dest).resolve() or Path(dest).exists():
+        raise FileExistsError("Classified output must be a new file, separate from its source")
+    if las_output not in LAS_OUTPUTS:
+        raise ValueError("Unsupported classified LAS version")
     las = laspy.read(source)
+    count = len(las.points)
+    point_instance = np.asarray(point_instance)
+    if (point_instance.shape != (count,) or point_instance.dtype.kind not in "iu" or
+            np.any(point_instance < 0) or np.any(point_instance > np.iinfo(np.uint32).max)):
+        raise ValueError("object_instance must contain one uint32-compatible integer per source point")
+    predicted = np.zeros(count, dtype=np.uint8)
+    expected = np.zeros(count, dtype=np.uint32)
+    for number, (cls, selected, _) in enumerate(groups, 1):
+        if not isinstance(cls, (int, np.integer)):
+            raise ValueError("Target class must be an integer")
+        check_target_code(cls)
+        selected = np.asarray(selected)
+        if (selected.ndim != 1 or selected.dtype.kind not in "iu" or
+                np.any(selected < 0) or np.any(selected >= count) or len(np.unique(selected)) != len(selected)):
+            raise ValueError("Object point indices are invalid, repeated or out of range")
+        if np.any(expected[selected]):
+            raise ValueError("Exported objects have overlapping points")
+        expected[selected] = number
+        predicted[selected] = cls
+    if not np.array_equal(expected, point_instance):
+        raise ValueError("object_instance does not match exported object groups")
     if las_output == "1.4" and las.header.point_format.id < 6:
         crs = las.header.parse_crs()
         las = laspy.convert(las, point_format_id=POINT_FORMAT_WITH_FULL_CLASS[las.header.point_format.id],
@@ -796,23 +896,28 @@ def write_classified(source, dest, groups, point_instance, las_output="same as i
             las.header.add_crs(crs)
     full = las.header.point_format.id >= 6
     codes = np.asarray(las.classification, dtype=np.uint8).copy()
-    user = np.asarray(las.user_data, dtype=np.uint8).copy()
-    in_user_data = False
+    in_extra_field = False
     for cls, selected, _ in groups:
         if full or cls <= 31:
             codes[selected] = cls
         else:
-            user[selected] = cls
-            in_user_data = True
+            in_extra_field = True
     las.classification = codes
-    las.user_data = user
-    las.add_extra_dim(laspy.ExtraBytesParams(name="object_instance", type=np.uint32,
-                                             description="Detected object number, 0 = none"))
+    for name, dtype, description in (
+            ("object_instance", np.uint32, "Detected object number, 0 = none"),
+            ("object_class", np.uint8, "Predicted target class, 0 = none")):
+        if name in set(las.point_format.dimension_names):
+            dimension = las.point_format.dimension_by_name(name)
+            if dimension.dtype != np.dtype(dtype) or dimension.scales is not None or dimension.offsets is not None:
+                raise ValueError(f"Existing {name} field has an incompatible type or scaling")
+        else:
+            las.add_extra_dim(laspy.ExtraBytesParams(name=name, type=dtype, description=description))
     las.object_instance = point_instance.astype(np.uint32)
+    las.object_class = predicted
     las.write(dest)
     return {"file": Path(dest).name, "las_version": str(las.header.version),
             "point_format": las.header.point_format.id,
-            "target_codes_in": "user_data" if in_user_data else "classification"}
+            "target_codes_in": "object_class" if in_extra_field else "classification"}
 
 
 # Rough share of a file's processing time per stage, for the progress bar.
@@ -903,7 +1008,8 @@ def process_batch(paths, model_path, output_root, cfg, log=print, progress=None)
                                                    cfg.las_output)
             truth_status, targets = None, None
             if truth_path(path).exists():
-                targets, truth_instance = load_truth(truth_path(path), len(features))
+                targets, truth_instance = load_truth(truth_path(path), len(features),
+                                                     source_sha256=entry["source_sha256"])
                 summary_truth, truth_status = evaluate_objects(point_instance, objects, targets, truth_instance)
                 write_json(folder / "evaluation.json", {"source": str(truth_path(path)), "summary": summary_truth,
                                                         "targets": targets})
