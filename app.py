@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
+import sys
 import threading
 import tkinter as tk
 import zipfile
@@ -39,8 +41,17 @@ def tooltip(widget, text):
     widget.bind("<Leave>", hide)
 
 
+def use_bundled_tcl_tk():
+    """Point Tk at the interpreter's own Tcl/Tk scripts when a venv hides them (e.g. uv-installed Python)."""
+    lib = Path(sys.base_prefix) / "lib"
+    for var, folder, script in (("TCL_LIBRARY", "tcl8.6", "init.tcl"), ("TK_LIBRARY", "tk8.6", "tk.tcl")):
+        if var not in os.environ and (lib / folder / script).is_file():
+            os.environ[var] = str(lib / folder)
+
+
 class App(tk.Tk):
     def __init__(self):
+        use_bundled_tcl_tk()
         super().__init__()
         self.title("Object Detection")
         self.geometry("1320x900")
