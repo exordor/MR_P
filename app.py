@@ -18,6 +18,27 @@ from core import (DISPLAY_LIMIT, Settings, display_indices, evaluate_model, labe
                   read_cloud, train_model)
 
 
+def tooltip(widget, text):
+    """Show text in a small popup while the pointer is over widget."""
+    tip = None
+
+    def show(event):
+        nonlocal tip
+        tip = tk.Toplevel(widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+        ttk.Label(tip, text=text, background="#ffffe0", relief="solid", borderwidth=1,
+                  padding=4, justify="left").pack()
+
+    def hide(event):
+        nonlocal tip
+        if tip:
+            tip.destroy()
+            tip = None
+    widget.bind("<Enter>", show)
+    widget.bind("<Leave>", hide)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -54,20 +75,19 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=12)
         top.pack(fill="x")
         ttk.Label(top, text="Object Detection", font=("Arial", 17, "bold")).pack(anchor="w")
-        ttk.Label(top, text="Train a model, detect objects, and view point clouds.").pack(anchor="w", pady=(2, 9))
         notebooks = ttk.Notebook(self)
         notebooks.pack(fill="both", expand=True, padx=12)
         processing, training = ttk.Frame(notebooks, padding=10), ttk.Frame(notebooks, padding=10)
         notebooks.add(processing, text="Process and View")
         notebooks.add(training, text="Train and Evaluate")
-        self.path_row(processing, "Trained model (trusted file)", self.model_path, self.pick_model, 0)
+        self.path_row(processing, "Model", self.model_path, self.pick_model, 0)
         self.path_row(processing, "Results directory", self.output_path, self.pick_output, 1)
         controls = ttk.Frame(processing)
         controls.grid(row=2, column=0, columnspan=3, sticky="ew", pady=6)
         ttk.Button(controls, text="Add LAS / LAZ", command=self.add_files).pack(side="left")
         ttk.Button(controls, text="Clear list", command=self.clear_files).pack(side="left", padx=5)
         ttk.Button(controls, text="Inspect input", command=self.inspect).pack(side="left", padx=5)
-        ttk.Button(controls, text="Process single / batch", command=self.process).pack(side="left", padx=5)
+        ttk.Button(controls, text="Process", command=self.process).pack(side="left", padx=5)
         ttk.Button(controls, text="Open saved results", command=self.open_run).pack(side="left", padx=5)
         ttk.Button(controls, text="Synthetic demo", command=self.open_demo).pack(side="left", padx=5)
         self.inputs = tk.Listbox(processing, height=3, exportselection=False)
@@ -83,7 +103,7 @@ class App(tk.Tk):
         ttk.Combobox(viewer_controls, textvariable=self.display_limit,
                      values=["1000", "5000", "10000", "30000"], state="readonly", width=8).pack(side="left")
         ttk.Button(viewer_controls, text="Apply", command=self.view).pack(side="left", padx=4)
-        self.view_note = ttk.Label(processing, text="Click View after processing. Display: up to 30,000 points; exports retain all points.")
+        self.view_note = ttk.Label(processing, text="")
         self.view_note.grid(row=5, column=0, columnspan=3, sticky="w")
         body = ttk.Frame(processing)
         body.grid(row=6, column=0, columnspan=3, sticky="nsew")
@@ -99,40 +119,40 @@ class App(tk.Tk):
         processing.columnconfigure(1, weight=1)
         processing.rowconfigure(6, weight=1)
         self.path_row(training, "Dataset manifest JSON", self.manifest_path, self.pick_manifest, 0)
-        ttk.Label(training, text="Labels CSV: point_index,class_id. 0=background; positive=target; blank/-1=unlabelled.\n"
-                  "Split independent scenes into train / validation / test; duplicate files and scene IDs are checked.\n"
-                  "Prepare annotations externally, e.g. with CloudCompare. No annotation editor is included.",
-                  justify="left").grid(row=1, column=0, columnspan=3, sticky="w", pady=15)
+        labels_hint = ttk.Label(training, text="Labels: point_index,class_id  (0 = background, -1 = unlabelled)")
+        labels_hint.grid(row=1, column=0, columnspan=3, sticky="w", pady=15)
+        tooltip(labels_hint, "One row per labelled point; positive IDs are target classes.\n"
+                             "Train, validation and test must come from different scenes.")
         row = ttk.Frame(training)
         row.grid(row=2, column=0, columnspan=3, sticky="w")
         ttk.Label(row, text="Method").pack(side="left")
-        ttk.Combobox(row, textvariable=self.backend, values=["random_forest", "mlp"], state="readonly", width=20).pack(side="left", padx=5)
-        ttk.Label(row, text="Trees / maximum iterations").pack(side="left", padx=8)
+        method = ttk.Combobox(row, textvariable=self.backend, values=["random_forest", "mlp"], state="readonly", width=20)
+        method.pack(side="left", padx=5)
+        iterations_label = ttk.Label(row, text="Trees")
+        iterations_label.pack(side="left", padx=8)
+        method.bind("<<ComboboxSelected>>", lambda e: iterations_label.configure(
+            text="Trees" if self.backend.get() == "random_forest" else "Max epochs"))
         ttk.Entry(row, textvariable=self.iterations, width=8).pack(side="left")
         buttons = ttk.Frame(training)
         buttons.grid(row=3, column=0, columnspan=3, sticky="w", pady=12)
         ttk.Button(buttons, text="Create label template", command=self.make_labels).pack(side="left")
         ttk.Button(buttons, text="Train and save model", command=self.train).pack(side="left", padx=8)
-        ttk.Button(buttons, text="Evaluate held-out test set", command=self.evaluate).pack(side="left", padx=8)
-        ttk.Label(training, text="Random Forest: default CPU baseline.\n"
-                  "MLP: a three-hidden-layer feature network, not PointNet or Pointcept.\n"
-                  "Validation metrics are saved with the model. Test labels are read only for explicit evaluation.\n"
-                  "Per-class DBSCAN converts point predictions into instances; touching objects may merge.",
-                  justify="left").grid(row=4, column=0, columnspan=3, sticky="w", pady=10)
+        ttk.Button(buttons, text="Evaluate on test set", command=self.evaluate).pack(side="left", padx=8)
         training.columnconfigure(1, weight=1)
-        settings = ttk.LabelFrame(self, text="Coordinates and processing settings (all X/Y/Z coordinates must be in metres)", padding=8)
+        settings = ttk.LabelFrame(self, text="Settings", padding=8)
         settings.pack(fill="x", padx=12, pady=8)
-        self.field(settings, "CRS if missing", self.crs, 0, 0, 18)
+        self.field(settings, "Fallback CRS", self.crs, 0, 0, 18)
         self.field(settings, "Vertical datum", self.datum, 0, 2, 18)
-        ttk.Checkbutton(settings, text="Confirm X/Y/Z are in metres", variable=self.meters).grid(row=0, column=4, columnspan=4, sticky="w")
+        ttk.Checkbutton(settings, text="X/Y/Z in metres", variable=self.meters).grid(row=0, column=4, columnspan=4, sticky="w")
         self.field(settings, "Score threshold", self.threshold, 1, 0, 8)
         self.field(settings, "Cluster radius m", self.radius, 1, 2, 8)
         self.field(settings, "Min object points", self.minimum, 1, 4, 8)
         ttk.Label(settings, text="Area method").grid(row=1, column=6, padx=6)
-        ttk.Combobox(settings, textvariable=self.area, values=["unresolved", "convex_hull_xy"], state="readonly", width=19).grid(row=1, column=7)
+        area = ttk.Combobox(settings, textvariable=self.area, values=["unresolved", "convex_hull_xy"], state="readonly", width=19)
+        area.grid(row=1, column=7)
+        tooltip(area, "unresolved: leave Area blank\nconvex_hull_xy: area of the XY convex hull")
         self.field(settings, "Neighbours", self.neighbors, 2, 0, 8)
         self.field(settings, "Max points / file", self.limit, 2, 2, 10)
-        ttk.Label(settings, text="unresolved: blank area; convex_hull_xy: XY convex hull (agreement required)").grid(row=2, column=4, columnspan=4, sticky="w")
         self.log_box = tk.Text(self, height=5, state="disabled", wrap="word")
         self.log_box.pack(fill="x", padx=12)
         self.progress = ttk.Progressbar(self, mode="indeterminate")
@@ -161,7 +181,7 @@ class App(tk.Tk):
 
     def job(self, fn, callback=None):
         if self.busy:
-            messagebox.showinfo("Processing", "Please wait for the current task to finish.")
+            messagebox.showinfo("Processing", "A task is already running.")
             return
         self.busy = True
         self.progress.start()
@@ -198,7 +218,7 @@ class App(tk.Tk):
         self.after(100, self.poll)
 
     def pick_model(self):
-        path = filedialog.askopenfilename(filetypes=[("Trained model (trusted only)", "*.joblib")])
+        path = filedialog.askopenfilename(filetypes=[("Model", "*.joblib")])
         if path:
             self.model_path.set(path)
 
@@ -297,7 +317,7 @@ class App(tk.Tk):
             self.load_run(candidates[-1].parent)
             self.show_objects.set(True)
             self.view()
-            self.log("Synthetic demonstration only; this model has not been validated on real survey data.")
+            self.log("Loaded synthetic demo.")
         self.safe_action(action)
 
     def load_run(self, path):
@@ -310,12 +330,12 @@ class App(tk.Tk):
         self.canvas.draw_idle()
         self.object_list.delete(0, "end")
         failed = sum(e["status"] == "failed" for e in metadata["datasets"])
-        self.log(f"{len(self.datasets)} successful datasets, {failed} failed; see run_metadata.json")
+        self.log(f"Loaded {len(self.datasets)} datasets, {failed} failed")
         if self.datasets:
             self.dataset.current(0)
         else:
             self.dataset.set("")
-            self.view_note.configure(text="No successful dataset to view; check the processing log.")
+            self.view_note.configure(text="No datasets to view.")
 
     def view(self):
         def action():
@@ -339,8 +359,7 @@ class App(tk.Tk):
             self.object_list.delete(0, "end")
             for obj in self.current_objects:
                 self.object_list.insert("end", f"{obj['object_id']} ({obj['class_name']})")
-            self.view_note.configure(text=f"Displaying {len(indices):,} / {total:,} points (display only); "
-                                     f"{len(self.current_objects)} objects. Left: rotate; middle: pan; right: zoom.")
+            self.view_note.configure(text=f"{len(indices):,} / {total:,} points shown · {len(self.current_objects)} objects")
             self.redraw()
         self.safe_action(action)
 
@@ -393,7 +412,7 @@ class App(tk.Tk):
 
     def close_app(self):
         if self.busy:
-            messagebox.showinfo("Task still running", "Wait for the current task to finish before closing to avoid incomplete results.")
+            messagebox.showinfo("Task running", "Wait for the current task to finish.")
             return
         self.destroy()
 
