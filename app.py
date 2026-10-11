@@ -114,10 +114,10 @@ class App(tk.Tk):
         body.grid(row=5, column=0, columnspan=3, sticky="nsew")
         columns = ("class", "points", "confidence", "x", "y", "z")
         self.object_list = ttk.Treeview(body, columns=columns, selectmode="browse")
-        self.object_list.heading("#0", text="Object ID")
+        self.object_list.heading("#0", text="Object ID", command=lambda: self.sort_objects("#0"))
         self.object_list.column("#0", width=150)
         for name, title in zip(columns, ("Class", "Points", "Confidence", "X", "Y", "Z")):
-            self.object_list.heading(name, text=title)
+            self.object_list.heading(name, text=title, command=lambda n=name: self.sort_objects(n))
             self.object_list.column(name, width=110, anchor="w" if name == "class" else "e")
         scroll = ttk.Scrollbar(body, orient="vertical", command=self.object_list.yview)
         self.object_list.configure(yscrollcommand=scroll.set)
@@ -366,6 +366,20 @@ class App(tk.Tk):
             points = f"{total:,} points · " if total else ""
             self.view_note.configure(text=f"{points}{len(self.current_objects):,} objects")
         self.safe_action(action)
+
+    def sort_objects(self, column):
+        """Click a heading to sort; click again to reverse."""
+        rows = self.object_list.get_children()
+        def key(row):
+            value = self.object_list.item(row, "text") if column == "#0" else self.object_list.set(row, column)
+            try:
+                return 0, float(value.replace(",", ""))
+            except ValueError:
+                return 1, value
+        reverse = getattr(self, "sorted_by", None) == column
+        for index, row in enumerate(sorted(rows, key=key, reverse=reverse)):
+            self.object_list.move(row, "", index)
+        self.sorted_by = None if reverse else column
 
     def open_browser_view(self, object_id=None):
         def action():
