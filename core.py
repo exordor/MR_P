@@ -92,6 +92,47 @@ def check_memory(count):
                          f"{total / 1024**3:.1f} GB. Split the file (e.g. by area) before processing.")
 
 
+def inspect_file(path):
+    """Header-only summary: no points are decoded and no settings are needed."""
+    path = Path(path)
+    with laspy.open(path) as reader:
+        header = reader.header
+        dims = set(header.point_format.dimension_names)
+        try:
+            crs = header.parse_crs()
+        except Exception as exc:  # Malformed CRS records should not hide the rest of the summary.
+            crs, crs_note = None, f"CRS unreadable: {exc}"
+        else:
+            crs_note = None
+    count = header.point_count
+    issues = []
+    missing = {"intensity", "return_number", "number_of_returns"} - dims
+    if missing:
+        issues.append(f"missing fields: {', '.join(sorted(missing))}")
+    if not {"scan_angle", "scan_angle_rank"} & dims:
+        issues.append("no scan angle")
+    if crs is None:
+        issues.append(crs_note or "no CRS in file: enter Fallback CRS")
+        crs_text = ""
+    else:
+        crs_text = crs.to_string()
+        if crs.is_geographic or not crs.is_projected:
+            issues.append("CRS is not projected: reproject to metres first")
+        elif any(abs(a.unit_conversion_factor - 1.0) > 1e-8 for a in crs.axis_info[:2]):
+            issues.append("CRS horizontal units are not metres")
+    total = physical_memory()
+    need = count * BYTES_PER_POINT
+    if total and need > total * 0.8:
+        issues.append("too large for this computer's memory: split the file")
+    if count < 3:
+        issues.append("fewer than 3 points")
+    return {"source": str(path.resolve()), "name": path.name, "file_bytes": path.stat().st_size,
+            "point_count": count, "las_version": str(header.version), "point_format": header.point_format.id,
+            "mins": header.mins.tolist(), "maxs": header.maxs.tolist(), "crs": crs_text,
+            "horizontal_unit": crs.axis_info[0].unit_name if crs is not None and crs.axis_info else "",
+            "fields": sorted(dims), "memory_bytes": need, "ram_bytes": total, "issues": issues}
+
+
 def read_cloud(path, cfg):
     validate_settings(cfg)
     path = Path(path)
@@ -531,7 +572,8 @@ def process_batch(paths, model_path, output_root, cfg, log=print):
     (run / "datasets").mkdir()
     summary = {"software_version": VERSION, "started_at": datetime.now().astimezone().isoformat(),
                "timezone": str(datetime.now().astimezone().tzinfo), "settings": asdict(cfg),
-               "model_id": model["model_id"], "model_sha256": sha256(model_path),
+               "model_id": model["model_id"], "model_path": str(Path(model_path).resolve()),
+               "model_sha256": sha256(model_path),
                "backend": model["backend"], "classes": model["classes"],
                "definitions": {"centroid": "mean of exported original coordinates",
                    "Intensity": "arithmetic mean of recorded raw LAS intensity; no radiometric correction",

@@ -10,8 +10,8 @@ from pathlib import Path
 import numpy as np
 
 import core
-from core import (HEADERS, Settings, dbscan, display_indices, evaluate_model, extract_features, instance_groups,
-                  load_manifest, load_model, make_run_directory, process_batch,
+from core import (HEADERS, Settings, dbscan, display_indices, evaluate_model, extract_features, inspect_file,
+                  instance_groups, load_manifest, load_model, make_run_directory, process_batch,
                   projected_area, read_cloud, train_model)
 from create_demo import create_demo
 from sklearn.cluster import DBSCAN
@@ -96,6 +96,24 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(entry["status"], "success_no_objects")
         with (run / "datasets/D0001/report.csv").open(encoding="utf-8-sig") as f:
             self.assertEqual(len(list(csv.reader(f))), 1)
+
+    def test_inspect_reads_header_without_settings(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        info = inspect_file(sample)
+        cloud = read_cloud(sample, self.cfg)
+        self.assertEqual(info["point_count"], len(cloud["xyz"]))
+        np.testing.assert_allclose(info["mins"], cloud["xyz"].min(axis=0), atol=1e-3)
+        np.testing.assert_allclose(info["maxs"], cloud["xyz"].max(axis=0), atol=1e-3)
+        self.assertIn("32632", info["crs"])
+        self.assertEqual(info["issues"], [])
+        self.assertIn("intensity", info["fields"])
+
+    def test_run_metadata_records_model_path(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        run = Path(process_batch([sample], self.model, self.root / "meta", self.cfg, log=lambda x: None))
+        metadata = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["model_path"], str(self.model.resolve()))
+        self.assertEqual(metadata["settings"]["threshold"], self.cfg.threshold)
 
     def test_area_definition(self):
         square = np.array([[500000, 6000000, -2], [500002, 6000000, -2],
