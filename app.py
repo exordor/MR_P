@@ -54,8 +54,9 @@ class App(tk.Tk):
         use_bundled_tcl_tk()
         super().__init__()
         self.title("Object Detection")
-        self.geometry("1320x900")
-        self.minsize(1200, 750)
+        height = min(1050, self.winfo_screenheight() - 80)
+        self.geometry(f"1320x{height}")
+        self.minsize(1200, min(700, height))
         self.events = queue.Queue()
         self.busy = False
         self.paths = []
@@ -151,7 +152,8 @@ class App(tk.Tk):
         ttk.Button(buttons, text="Evaluate on test set", command=self.evaluate).pack(side="left", padx=8)
         training.columnconfigure(1, weight=1)
         settings = ttk.LabelFrame(self, text="Settings", padding=8)
-        settings.pack(fill="x", padx=12, pady=8)
+        # Docked to the bottom before the notebook, so a short window shrinks the plot instead of hiding these.
+        settings.pack(side="bottom", fill="x", padx=12, pady=8, before=notebooks)
         self.field(settings, "Fallback CRS", self.crs, 0, 0, 18)
         self.field(settings, "Vertical datum", self.datum, 0, 2, 18)
         ttk.Checkbutton(settings, text="X/Y/Z in metres", variable=self.meters).grid(row=0, column=4, columnspan=4, sticky="w")
@@ -165,9 +167,9 @@ class App(tk.Tk):
         self.field(settings, "Neighbours", self.neighbors, 2, 0, 8)
         self.field(settings, "Max points / file", self.limit, 2, 2, 10)
         self.log_box = tk.Text(self, height=5, state="disabled", wrap="word")
-        self.log_box.pack(fill="x", padx=12)
+        self.log_box.pack(side="bottom", fill="x", padx=12, before=settings)
         self.progress = ttk.Progressbar(self, mode="indeterminate")
-        self.progress.pack(fill="x", padx=12, pady=6)
+        self.progress.pack(side="bottom", fill="x", padx=12, pady=6, before=self.log_box)
 
     @staticmethod
     def field(parent, title, variable, row, col, width):
