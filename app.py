@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QPushButton, QSpinBox, QDoubleSpinBox, QSplitter, QTableView, QTableWidget, QTableWidgetItem, QTabWidget,
                                QVBoxLayout, QWidget)
 
-from core import (Settings, evaluate_model, inspect_file, label_template, process_batch, refresh_web_view,
+from core import (Settings, evaluate_model, inspect_file, label_template, process_batch, refresh_web_view, regroup_run,
                   train_model, write_web_view)
 
 
@@ -287,6 +287,13 @@ class App(QMainWindow):
                                         "Copy this run's settings and model into the current Settings, to process again the same way.")
         self.reuse_button.setVisible(False)
         run_row.addWidget(self.reuse_button)
+        self.regroup_button = self.button(
+            "Regroup", self.regroup,
+            "Group this run's points into objects again with the current Score threshold, Cluster radius and "
+            "Min object points.\nPoints are not classified again, so this takes a fraction of Process. "
+            "The result is saved as a new run.")
+        self.regroup_button.setVisible(False)
+        run_row.addWidget(self.regroup_button)
         layout.addLayout(run_row)
         self.evaluation_note = QLabel("")
         self.evaluation_note.setWordWrap(True)
@@ -566,6 +573,13 @@ class App(QMainWindow):
             self.job(lambda: process_batch(paths, model, output, cfg, self.log, self.report_progress), self.load_run)
         self.safe_action(action)
 
+    def regroup(self):
+        def action():
+            cfg, run = self.settings(), self.run_path
+            output = self.output_path.text() or str(run.parent)
+            self.job(lambda: regroup_run(run, output, cfg, self.log, self.report_progress), self.load_run)
+        self.safe_action(action)
+
     def report_progress(self, *value):
         """Thread-safe: called from the worker thread."""
         self.bridge.event.emit("progress", value)
@@ -684,8 +698,11 @@ class App(QMainWindow):
                       f"area {cfg['area_method']}"]
             if cfg.get("crs_override"):
                 parts.append(f"fallback CRS {cfg['crs_override']}")
+        if metadata.get("regrouped_from"):
+            parts.append(f"regrouped from {Path(metadata['regrouped_from']).name}")
         self.run_info.setText("This run: " + " · ".join(parts))
         self.reuse_button.setVisible(bool(cfg))
+        self.regroup_button.setVisible(bool(cfg))
 
     def reuse_run_settings(self):
         def action():
@@ -772,7 +789,7 @@ class App(QMainWindow):
                 f"{result['true_positives']} · mean IoU {ratio(result['mean_iou'])}")
         if result.get("recall_by_visible_points"):
             text += " · found by points on target: " + ", ".join(
-                f"{k} pts {v}" for k, v in result["recall_by_visible_points"].items())
+                f"{html.escape(k)} pts {v}" for k, v in result["recall_by_visible_points"].items())
         if result["mean_centre_error_m"] is not None:
             text += f" · mean centre error {result['mean_centre_error_m']:.2f} m"
         if missed:

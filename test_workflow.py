@@ -103,6 +103,39 @@ class WorkflowTest(unittest.TestCase):
         with (run / "datasets/D0001/report.csv").open(encoding="utf-8-sig") as f:
             self.assertEqual(len(list(csv.reader(f))), 1)
 
+    def test_regroup_reuses_predictions_without_reclassifying(self):
+        sample = self.manifest.parent / "SYNTHETIC_test.laz"
+        run = Path(process_batch([sample], self.model, self.root / "regroup", self.cfg, log=lambda x: None))
+        objects = (run / "datasets/D0001/objects.json").read_text(encoding="utf-8")
+        same = Path(core.regroup_run(run, self.root / "regroup", Settings(**{**self.cfg.__dict__, "neighbors": 7}),
+                                     log=lambda x: None))
+        # Same grouping settings give the same objects; reading settings stay those of the first run.
+        self.assertEqual((same / "datasets/D0001/objects.json").read_text(encoding="utf-8"), objects)
+        metadata = json.loads((same / "run_metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["regrouped_from"], str(run.resolve()))
+        self.assertEqual(metadata["settings"]["neighbors"], self.cfg.neighbors)
+        self.assertEqual(metadata["model_id"], json.loads((run / "run_metadata.json").read_text())["model_id"])
+        strict = Settings(**{**self.cfg.__dict__, "min_points": 1000})
+        empty = Path(core.regroup_run(same, self.root / "regroup", strict, log=lambda x: None))
+        entry = json.loads((empty / "run_metadata.json").read_text(encoding="utf-8"))["datasets"][0]
+        self.assertEqual((entry["status"], entry["object_count"]), ("success_no_objects", 0))
+        self.assertEqual(json.loads((empty / "run_metadata.json").read_text())["settings"]["min_points"], 1000)
+
+    def test_regroup_refuses_changed_input_and_old_runs(self):
+        sample = self.root / "regroup_input.laz"
+        shutil.copy(self.manifest.parent / "SYNTHETIC_test.laz", sample)
+        run = Path(process_batch([sample], self.model, self.root / "regroup_checks", self.cfg, log=lambda x: None))
+        las = laspy.read(sample)
+        las.intensity = las.intensity // 2
+        las.write(sample)
+        changed = Path(core.regroup_run(run, self.root / "regroup_checks", self.cfg, log=lambda x: None))
+        entry = json.loads((changed / "run_metadata.json").read_text(encoding="utf-8"))["datasets"][0]
+        self.assertEqual(entry["status"], "failed")
+        self.assertIn("changed", entry["error"])
+        (run / "datasets/D0001" / core.PREDICTIONS).unlink()
+        with self.assertRaisesRegex(ValueError, "no saved point predictions"):
+            core.regroup_run(run, self.root / "regroup_checks", self.cfg, log=lambda x: None)
+
     def test_inspect_reads_header_without_settings(self):
         sample = self.manifest.parent / "SYNTHETIC_test.laz"
         info = inspect_file(sample)

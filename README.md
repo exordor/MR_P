@@ -49,6 +49,8 @@ It needs the public sample files (path set in `DATA` in the script) and takes a 
 
 On Devil's Bridge, the saved demonstration finds 24 of 40 targets with 3 false alarms, using threshold 0.6, cluster radius 0.3 m and at least 8 points per object. Detection depends mainly on how many laser points land on a target: 22 of 24 targets with at least 20 points were found, but only 2 of 16 with fewer. These numbers show that the workflow runs. Simulated targets are not evidence of real-world performance.
 
+To try other grouping settings on a result, change Score threshold, Cluster radius or Min object points and press **Regroup**. It reuses the run's saved point predictions instead of classifying again (about 3 s instead of 12 s for Devil's Bridge) and saves a new run. On Devil's Bridge, threshold 0.5 finds 26 targets with 17 false alarms. Forest settings (depth, leaf size, tree count, class weights) were compared on the validation and test scenes and none did better than the defaults beyond the spread between random seeds.
+
 ## LAS classes
 
 Input classes follow ASPRS LAS 1.4, including the topo-bathymetric codes YellowScan uses: 1 unassigned, 2 ground, 7 low noise, 40 bathymetric bottom, 41 water surface, 45 water column, and others. The model uses them as inputs (bottom, water surface, water column, ground, noise), together with each point's height above the local riverbed, estimated from class 40 points.
