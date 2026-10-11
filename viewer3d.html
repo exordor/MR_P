@@ -43,18 +43,18 @@
 <header>
   <span class="name" id="title"></span>
   <span class="spacer"></span>
-  <label>Colour <select id="colour">
+  <label title="点的着色方式：按类别、按物体（每个物体一种颜色）、按高度或按反射强度。">Colour <select id="colour">
     <option value="class">Class</option><option value="objects">Objects</option>
     <option value="height">Height</option><option value="intensity">Intensity</option>
   </select></label>
-  <label>Size <input id="size" type="range" min="1" max="6" step="0.5" value="2"></label>
-  <label><input id="edl" type="checkbox" checked> Shading</label>
-  <input id="find" type="text" placeholder="Find object ID ↵">
-  <button id="top">Top</button>
-  <button id="reset">Reset view</button>
+  <label title="点的显示大小。向右拖动点更大、更容易看清；向左点更小、细节更清楚。">Size <input id="size" type="range" min="1" max="6" step="0.5" value="2"></label>
+  <label title="打开后给点加阴影，更容易看出立体形状；关闭则显示平面颜色。"><input id="edl" type="checkbox" checked> Shading</label>
+  <input id="find" type="text" placeholder="Find object ID ↵" title="输入物体编号并按回车，视图会跳到该物体。">
+  <button id="top" title="切换到正上方俯视的视角。">Top</button>
+  <button id="reset" title="恢复默认视角，显示整个点云。">Reset view</button>
 </header>
 <main>
-  <canvas id="gl" title="Drag: rotate · Right-drag or Shift-drag: pan · Wheel: zoom · Double-click: reset"></canvas>
+  <canvas id="gl" title="拖动：旋转 · 右键拖动或 Shift+拖动：平移 · 滚轮：缩放 · 双击：恢复视角"></canvas>
   <div id="legend"></div>
   <div id="scale"></div>
 </main>
@@ -219,7 +219,7 @@ function legend(mode) {
     classNames.map(([, name], k) => {
       const colour = k === 0 ? `linear-gradient(90deg,${TERRAIN.map(css)})`
         : mode === "objects" ? `conic-gradient(${OBJECT.slice(0, 5).map(css)})` : css(CLASS[(k - 1) % CLASS.length]);
-      return `<label class="row"><input type="checkbox" data-k="${k}" ${hidden >> k & 1 ? "" : "checked"}>
+      return `<label class="row" title="取消勾选可隐藏这一类的点。"><input type="checkbox" data-k="${k}" ${hidden >> k & 1 ? "" : "checked"}>
         <span class="swatch" style="background:${colour}"></span>${name}<span class="count">${classCounts[k].toLocaleString("en")}</span></label>`;
     }).join("");
   box.querySelectorAll("input").forEach(cb => cb.addEventListener("change", () => {
