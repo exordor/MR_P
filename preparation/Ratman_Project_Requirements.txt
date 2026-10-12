@@ -1,7 +1,7 @@
-﻿MOST ROBOTICS — SOFTWARE REQUIREMENTS
+﻿Ratman project — SOFTWARE REQUIREMENTS
 Underwater Object Detection and Segmentation in 3D Point Clouds
 Version: 0.2 | Status: Draft for joint review
-Prepared for: MOST Robotics and TU Clausthal
+Prepared for: Ratman project and TU Clausthal
 
 1. PURPOSE
 Develop software that integrates a selected deep-learning framework to train
@@ -10,7 +10,7 @@ clouds. The software shall calculate object properties, export segmented
 objects and generate a structured detection report.
 
 2. INPUT DATA AND CLIENT CONTRIBUTIONS
-REQ-01 MOST Robotics shall provide georeferenced 3D point-cloud datasets in
+REQ-01 Ratman project shall provide georeferenced 3D point-cloud datasets in
        LAS (*.las) or LAZ (*.laz) format and their associated full-waveform data.
        If waveform samples are stored separately, the associated files and
        information linking them to the point clouds shall also be provided.
@@ -23,7 +23,7 @@ REQ-04 The agreed underwater target-object categories shall define the scope
 REQ-05 The supplied point clouds are currently unlabelled. Before supervised
        training, the required annotations, annotation responsibility, effort
        and quality checks shall be agreed. Annotation work is not assumed to
-       be completed by MOST Robotics or automatically included in this draft.
+       be completed by Ratman project or automatically included in this draft.
 
 3. DATA PREPARATION AND MODEL TRAINING
 REQ-06 The software shall import LAS/LAZ point clouds, check required attributes
@@ -95,7 +95,7 @@ REQ-22 The software shall generate a machine-readable detection report with
 
        object ID | x | y | z | Nr_of_points | Intensity | Area | confidence
 
-REQ-23 CSV is the proposed report format. MOST Robotics shall approve the
+REQ-23 CSV is the proposed report format. Ratman project shall approve the
        final format, headings, numeric precision, units and missing-value
        representation before implementation is finalised.
 REQ-24 Source-dataset mapping shall be maintained through per-dataset reports
@@ -155,7 +155,7 @@ REQ-31 Detection and segmentation quality shall be assessed on held-out data
        metrics and acceptance thresholds shall be agreed before final testing.
 REQ-32 Installation and agreed workflows shall be verified on the approved
        Windows and Linux environments.
-REQ-33 MOST Robotics shall confirm the proposed report format/content and
+REQ-33 Ratman project shall confirm the proposed report format/content and
        deployment requirements. TU Clausthal shall implement the agreed design.
 
 10. DELIVERABLES

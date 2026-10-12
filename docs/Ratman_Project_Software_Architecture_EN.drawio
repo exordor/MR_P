@@ -1,11 +1,11 @@
 <?xml version='1.0' encoding='utf-8'?>
 <mxfile host="app.diagrams.net" type="device">
-  <diagram name="MOST Simple Software Architecture" id="most-simple-architecture-en">
+  <diagram name="Ratman project Simple Software Architecture" id="ratman-simple-architecture-en">
     <mxGraphModel grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1660" pageHeight="920">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="title" value="MOST Robotics | YellowScan LAZ Underwater Object Detection" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae6f0;strokeColor=#aec1d0;fontColor=#17354d;fontSize=26;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+        <mxCell id="title" value="Ratman project | LAZ Underwater Object Detection" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae6f0;strokeColor=#aec1d0;fontColor=#17354d;fontSize=26;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="50" y="25" width="1560" height="65" />
         </mxCell>
         <mxCell id="ui" value="Desktop interface and job queue&#10;&#10;Select files, models and settings | Train and evaluate | Process one file or a batch&#10;View | Show objects | Select object IDs | Progress and error log" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#e8eafa;strokeColor=#aec1d0;fontColor=#17354d;fontSize=17;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
@@ -53,7 +53,7 @@
         <mxCell id="e6" source="exports" target="viewer" parent="1" edge="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;strokeColor=#55748b;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.766667;entryY=0;">
           <mxGeometry as="geometry" relative="1" />
         </mxCell>
-        <mxCell id="note" value="Scope and next steps&#10;&#10;Prototype: one local process; no server or database. RF / MLP are integrated; Pointcept and SoftGroup are not.&#10;Next: real YellowScan validation, deep point-cloud models, waveform decoding, large-cloud tiling and Linux acceptance testing." style="rounded=1;whiteSpace=wrap;html=0;fillColor=#f4f6f9;strokeColor=#aec1d0;fontColor=#17354d;fontSize=16;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
+        <mxCell id="note" value="Scope and next steps&#10;&#10;Prototype: one local process; no server or database. RF / MLP are integrated; Pointcept and SoftGroup are not.&#10;Next: real Ratman project validation, deep point-cloud models, waveform decoding, large-cloud tiling and Linux acceptance testing." style="rounded=1;whiteSpace=wrap;html=0;fillColor=#f4f6f9;strokeColor=#aec1d0;fontColor=#17354d;fontSize=16;fontFamily=Arial;spacing=14;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="50" y="790" width="1560" height="110" />
         </mxCell>
       </root>

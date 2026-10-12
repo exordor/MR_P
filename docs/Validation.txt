@@ -3,7 +3,7 @@ Date: 9 October 2026
 
 Environment: Windows build 26100, Python 3.11.9, Tk 8.6.12.
 Pinned dependency versions are listed in requirements.txt.
-Linux installation and real YellowScan recognition have not been validated.
+Linux installation and real Ratman project recognition have not been validated.
 
 Ten synthetic LAZ workflow tests passed:
   deterministic display sampling: 100,000 input points, bounded budgets and tiny-instance retention

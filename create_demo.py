@@ -50,7 +50,7 @@ def create_demo(destination):
     (destination / "manifest.json").write_text(json.dumps(
         {"classes": {"64": "synthetic_object"}, "datasets": records}, indent=2), encoding="utf-8")
     (destination / "SYNTHETIC_ONLY.txt").write_text(
-        "Synthetic geometry and intensity for software workflow checks only. Not real YellowScan data.\n"
+        "Synthetic geometry and intensity for software workflow checks only. Not real Ratman project data.\n"
         "A model trained on these data has no demonstrated real-world underwater detection performance.\n", encoding="utf-8")
     return destination / "manifest.json"
 

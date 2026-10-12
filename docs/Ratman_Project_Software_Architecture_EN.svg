@@ -3,7 +3,7 @@
 <rect width="1660" height="920" fill="#ffffff"/>
 <g font-family="Arial, Helvetica, sans-serif" fill="#17354d">
 <rect x="50" y="25" width="1560" height="65" rx="12" fill="#dae6f0" stroke="#aec1d0"/>
-<text x="66" y="59" font-size="26" font-weight="bold">MOST Robotics | YellowScan LAZ Underwater Object Detection</text>
+<text x="66" y="59" font-size="26" font-weight="bold">Ratman project | LAZ Underwater Object Detection</text>
 <rect x="50" y="120" width="1560" height="110" rx="12" fill="#e8eafa" stroke="#aec1d0"/>
 <text x="66" y="154" font-size="21" font-weight="bold">Desktop interface and job queue</text>
 <text x="66" y="188" font-size="16">Select files, models and settings | Train and evaluate | Process one file or a batch</text>
@@ -58,5 +58,5 @@
 <rect x="50" y="790" width="1560" height="110" rx="12" fill="#f4f6f9" stroke="#aec1d0"/>
 <text x="66" y="824" font-size="20" font-weight="bold">Scope and next steps</text>
 <text x="66" y="858" font-size="16">Prototype: one local process; no server or database. RF / MLP are integrated; Pointcept and SoftGroup are not.</text>
-<text x="66" y="885" font-size="16">Next: real YellowScan validation, deep point-cloud models, waveform decoding, large-cloud tiling and Linux acceptance testing.</text>
+<text x="66" y="885" font-size="16">Next: real Ratman project validation, deep point-cloud models, waveform decoding, large-cloud tiling and Linux acceptance testing.</text>
 </g></svg>

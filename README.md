@@ -1,14 +1,16 @@
-# Object Detection
+# Ratman project
 
-A small offline desktop prototype for detecting and separating underwater objects in georeferenced YellowScan LAS/LAZ point clouds. The current implementation uses a Random Forest baseline, an optional MLP feature network, and per-class DBSCAN instance grouping.
+Object Detection
 
-This is a research prototype. Real YellowScan detection performance, waveform processing and Linux deployment have not yet been validated. Pointcept and SoftGroup are assessed as future options; neither is integrated.
+A small offline desktop prototype for detecting and separating underwater objects in georeferenced Ratman project LAS/LAZ point clouds. The current implementation uses a Random Forest baseline, an optional MLP feature network, and per-class DBSCAN instance grouping.
+
+This is a research prototype. Real Ratman project detection performance, waveform processing and Linux deployment have not yet been validated. Pointcept and SoftGroup are assessed as future options; neither is integrated.
 
 ## Software architecture
 
-![English software architecture](docs/MOST_Software_Architecture_EN.png)
+![English software architecture](docs/Ratman_Project_Software_Architecture_EN.png)
 
-The architecture is fully editable in [diagrams.net](docs/MOST_Software_Architecture_EN.drawio). An [SVG version](docs/MOST_Software_Architecture_EN.svg) and [architecture notes](docs/Software_Architecture.md) are included.
+The architecture is fully editable in [diagrams.net](docs/Ratman_Project_Software_Architecture_EN.drawio). An [SVG version](docs/Ratman_Project_Software_Architecture_EN.svg) and [architecture notes](docs/Software_Architecture.md) are included.
 
 ## Installation
 
@@ -35,7 +37,7 @@ From the project directory after installation, generate and train an explicitly 
 
 On Linux, use `.venv/bin/python` instead. Start the application and click **Synthetic demo**. The button opens the saved demonstration result; it does not run training automatically. Use a new destination name when regenerating the data.
 
-The demonstration contains no real YellowScan measurements. Its trained model and metrics provide no evidence of real-world underwater recognition performance.
+The demonstration contains no real Ratman project measurements. Its trained model and metrics provide no evidence of real-world underwater recognition performance.
 
 ## Metal targets demonstration (real scenes, simulated targets)
 
@@ -45,7 +47,7 @@ The intended targets are square metal plates and metal spheres under about 1 m, 
 .venv/bin/python synthetic_targets.py metal_demo --train-and-run
 ```
 
-It needs the public sample files (path set in `DATA` in the script) and takes a few minutes. Three crops are written: Saint-Bauzille A (train, 70 targets), Saint-Bauzille B (validation, 30) and Devil's Bridge (test, 40), each as `<scene>.laz`, `<scene>.labels.csv` and `<scene>.truth.json`. Each target is sampled on the side the scanner sees, with the local riverbed point density, 2–3 cm range noise, a brighter but noisy intensity, return attributes copied from nearby bottom points, imperfect vendor classes (mostly 40, some 45 and 1), the riverbed underneath removed, and a few water-column returns above it. Click **Metal targets demo** to open the result.
+It needs the public sample files in `data/public/yellowscan_navigator/` (or the folder named by the `MR_PUBLIC_DATA` environment variable) and takes a few minutes. Three crops are written: Saint-Bauzille A (train, 70 targets), Saint-Bauzille B (validation, 30) and Devil's Bridge (test, 40), each as `<scene>.laz`, `<scene>.labels.csv` and `<scene>.truth.json`. Each target is sampled on the side the scanner sees, with the local riverbed point density, 2–3 cm range noise, a brighter but noisy intensity, return attributes copied from nearby bottom points, imperfect vendor classes (mostly 40, some 45 and 1), the riverbed underneath removed, and a few water-column returns above it. Click **Metal targets demo** to open the result.
 
 On Devil's Bridge, the saved demonstration finds 24 of 40 targets with 3 false alarms, using threshold 0.6, cluster radius 0.3 m and at least 8 points per object. Detection depends mainly on how many laser points land on a target: 22 of 24 targets with at least 20 points were found, but only 2 of 16 with fewer. These numbers show that the workflow runs. Simulated targets are not evidence of real-world performance.
 
@@ -83,7 +85,7 @@ A truth file lists `source_sha256` (the input LAS/LAZ file's SHA-256), `point_co
 
 ## Real data workflow
 
-1. Export appropriately georeferenced and corrected LAS/LAZ data from CloudStation. The prototype does not process YellowScan RAW, reconstruct trajectories or perform underwater refraction correction.
+1. Export appropriately georeferenced and corrected LAS/LAZ data from CloudStation. The prototype does not process Ratman project RAW, reconstruct trajectories or perform underwater refraction correction.
 2. Confirm that X, Y and Z are in metres. Supply the known projected CRS if it is absent from the LAS header. This setting records the CRS and does not reproject coordinates. Geographic or non-metric horizontal coordinates are rejected.
 3. Prepare labels in `point_index,class_id` CSV files, or as a LAS/LAZ file (see [LAS classes](#las-classes)). Indices refer to the original zero-based point-record order. Class IDs are ASPRS LAS codes (see [LAS classes](#las-classes)): a manifest target class marks a target, any other code marks a non-target point, and blank or -1 means unlabelled. External annotation tools must preserve or recover this mapping.
 4. Create a dataset manifest using `manifest_example.json`. Separate independent scenes or non-overlapping regions into train, validation and test sets. Use the same `scene_id` for overlapping data; the software checks duplicate paths, identical file content and cross-split scene IDs, but cannot prove that different files do not overlap spatially. Random-forest classes are weighted by inverse frequency unless the manifest sets `"balance_classes": false`.
@@ -134,12 +136,12 @@ Full-waveform samples are not decoded or used. The importer records some wavefor
 
 ## Requirements and method assessment
 
-- [Original English requirements v0.2](preparation/MOST_Robotics_Requirements.txt)
+- [English requirements v0.2](preparation/Ratman_Project_Requirements.txt)
 - [GitHub method assessment](docs/Model_Assessment.md)
-- [English data notes](docs/YellowScan_Data_Notes.md)
+- [English data notes](docs/Ratman_Project_Data_Notes.md)
 - [Functional validation record](docs/Validation.txt)
 
-All four supplied `preparation` files are preserved unchanged in `preparation/`. This includes the original Chinese source report and Chinese requirements translation. Client-facing software, current architecture and explanatory documentation are in English. The original supplied architecture is a legacy source document; use the current architecture in `docs/` for this implementation.
+The four supplied `preparation` documents are included in `preparation/` with project names updated to Ratman project. This includes the original Chinese source report and Chinese requirements translation. Client-facing software, current architecture and explanatory documentation are in English. The original supplied architecture is a legacy source document; use the current architecture in `docs/` for this implementation.
 
 ## Verification
 

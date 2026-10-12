@@ -1,14 +1,14 @@
 <?xml version='1.0' encoding='utf-8'?>
 <mxfile host="app.diagrams.net" type="device">
-  <diagram name="Software Architecture" id="most-architecture">
+  <diagram name="Software Architecture" id="ratman-architecture">
     <mxGraphModel dx="1800" dy="1100" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1800" pageHeight="1100" arrows="1">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="title" value="MOST Robotics | Underwater Object Detection Software&#10;Draft editable architecture — requirements v0.1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#16324f;strokeColor=#16324f;fontSize=22;fontFamily=Arial;spacing=12;fontColor=#ffffff;" vertex="1" parent="1">
+        <mxCell id="title" value="Ratman project | Underwater Object Detection Software&#10;Draft editable architecture — requirements v0.1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#16324f;strokeColor=#16324f;fontSize=22;fontFamily=Arial;spacing=12;fontColor=#ffffff;" vertex="1" parent="1">
           <mxGeometry x="40" y="20" width="1720" height="70" as="geometry" />
         </mxCell>
-        <mxCell id="input" value="MOST ROBOTICS INPUTS&#10;LAS / LAZ point clouds&#10;Associated full-waveform data&#10;Dataset purpose and location" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
+        <mxCell id="input" value="Ratman project INPUTS&#10;LAS / LAZ point clouds&#10;Associated full-waveform data&#10;Dataset purpose and location" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">
           <mxGeometry x="40" y="180" width="260" height="145" as="geometry" />
         </mxCell>
         <mxCell id="import" value="IMPORT &amp; VALIDATION&#10;Read points / waveform links&#10;Check fields and coordinates&#10;Keep source identifiers" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontFamily=Arial;spacing=12;" vertex="1" parent="1">

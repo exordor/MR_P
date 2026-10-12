@@ -1,7 +1,7 @@
-# Supplied preparation files
+# Ratman project preparation files
 
-The four original preparation files are preserved unchanged. SOURCE_MANIFEST.json records their filenames and SHA-256 hashes.
+These are project copies of the four supplied preparation documents. Project names and filenames have been updated to Ratman project; the desktop source files remain unchanged. SOURCE_MANIFEST.json records the current repository files and their SHA-256 hashes.
 
-MOST_Robotics_Requirements.txt is the original English v0.2 requirements document. MOST_Robotics_Requirements_ZH.txt and the YellowScan Word report are original Chinese source materials.
+Ratman_Project_Requirements.txt contains the English v0.2 requirements. Ratman_Project_Requirements_ZH.txt and the Word report contain Chinese source material.
 
-MOST_Robotics_Software_Architecture.drawio is the supplied legacy English architecture. The current prototype architecture is documented in ../docs/MOST_Software_Architecture_EN.drawio and ../docs/Software_Architecture.md.
+Ratman_Project_Software_Architecture.drawio is the supplied legacy English architecture. Use ../docs/Ratman_Project_Software_Architecture_EN.drawio and ../docs/Software_Architecture.md for the current implementation.

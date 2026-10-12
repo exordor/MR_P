@@ -17,12 +17,12 @@ from core import (HEADERS, Settings, dbscan, display_indices, evaluate_model, ex
                   projected_area, read_cloud, train_model)
 from core import refresh_web_view
 from create_demo import create_demo
+from synthetic_targets import DATA
 from sklearn.cluster import DBSCAN
 
 
 
-REAL_LAS_12 = Path("/Users/jlw/code/MR/data/public/yellowscan_navigator/"
-                   "SW_NAV_60mAGL_5ms_SACLCOmod_EPSG_32633_Barsebackshamn_harbour-F001.las")
+REAL_LAS_12 = Path(DATA, "SW_NAV_60mAGL_5ms_SACLCOmod_EPSG_32633_Barsebackshamn_harbour-F001.las")
 
 
 def web_data(folder):

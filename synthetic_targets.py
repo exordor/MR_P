@@ -10,6 +10,7 @@ vendor classes, the riverbed hidden underneath it, and a few water-column return
 """
 import csv
 import json
+import os
 from pathlib import Path
 
 import laspy
@@ -18,7 +19,8 @@ from scipy.spatial import Delaunay, cKDTree
 from core import sha256, write_label_source
 
 TARGETS = {64: "metal_plate", 65: "metal_sphere"}  # LAS user-definable class codes (64..255).
-DATA = Path("/Users/jlw/code/MR/data/public/yellowscan_navigator")
+# Public YellowScan Navigator samples; set MR_PUBLIC_DATA to use another folder.
+DATA = Path(os.environ.get("MR_PUBLIC_DATA", Path(__file__).resolve().parent / "data" / "public" / "yellowscan_navigator"))
 SAINT_BAUZILLE = "BC40-NA-NOA-80mAGL-7mps-High-SACL-Saint_Bauzille_de_Putois-1.las"
 DEVILS_BRIDGE = "BC40-NA-M600-80mAGL-5mps-Medium-SACLCO-Devils Bridge.laz"
 # (name, split, source file, box xmin, ymin, xmax, ymax in EPSG:2154 metres, number of targets)
